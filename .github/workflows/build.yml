@@ -1,0 +1,191 @@
+name: Build Stingray Crash Analyzer & Release
+
+on:
+  push:
+    branches: ["master"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHONHASHSEED: "1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Prepare Artifact Folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          New-Item -ItemType Directory -Force artifact\sha256 | Out-Null
+
+      - name: Build Executable
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm `
+            --onefile `
+            --noconsole `
+            --name "StingrayAnalyzer" `
+            stingray_crash_analyzer.py
+
+          if (-not (Test-Path "dist\StingrayAnalyzer.exe")) {
+            throw "Build failed"
+          }
+
+          Copy-Item "dist\StingrayAnalyzer.exe" "artifact\" -Force
+          Copy-Item "crash_patterns.json" "artifact\" -Force
+
+      - name: Generate Build Info
+        shell: pwsh
+        run: |
+          $buildInfo = @{
+            version = "${{ github.ref_name }}"
+            date = Get-Date -Format "yyyy-MM-dd"
+            commit = "${{ github.sha }}"
+            builder = "github-actions"
+            tool = "pyinstaller"
+          } | ConvertTo-Json -Depth 10
+
+          $buildInfo | Set-Content "artifact\build_info.json" -Encoding utf8
+
+      - name: Generate SHA256 Hashes
+        shell: pwsh
+        run: |
+          $exeHash  = (Get-FileHash "artifact\StingrayAnalyzer.exe" -Algorithm SHA256).Hash
+          $jsonHash = (Get-FileHash "artifact\crash_patterns.json" -Algorithm SHA256).Hash
+
+          $exeHash  | Set-Content "artifact\sha256\exe.sha256"
+          $jsonHash | Set-Content "artifact\sha256\patterns.sha256"
+
+      - name: Create Manifest
+        shell: pwsh
+        run: |
+          $exeHash  = Get-Content "artifact\sha256\exe.sha256"
+          $jsonHash = Get-Content "artifact\sha256\patterns.sha256"
+
+          $manifest = @{
+            version = "${{ github.ref_name }}"
+            build_date = Get-Date -Format "yyyy-MM-dd"
+            files = @{
+              "StingrayAnalyzer.exe" = $exeHash
+              "crash_patterns.json" = $jsonHash
+            }
+          } | ConvertTo-Json -Depth 10
+
+          $manifest | Set-Content "artifact\manifest.json" -Encoding utf8
+
+          $manifestHash = (Get-FileHash "artifact\manifest.json" -Algorithm SHA256).Hash
+          $manifestHash | Set-Content "artifact\sha256\manifest.sha256"
+
+      - name: Create Release ZIP
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace "refs/tags/", ""
+          $zip = "release_$tag.zip"
+
+          Compress-Archive `
+            -Path "artifact\*" `
+            -DestinationPath "artifact\$zip" `
+            -Force
+
+          $zipHash = (Get-FileHash "artifact\$zip" -Algorithm SHA256).Hash
+          $zipHash | Set-Content "artifact\sha256\zip.sha256"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifact
+          path: artifact/
+
+      - name: Upload Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifact/release_*.zip
+          prerelease: ${{ contains(github.ref_name, '-dev') }}
+
+  update_readme:
+    runs-on: windows-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-dev')
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifact
+          path: artifact/
+
+      - name: Update README
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}" -replace "refs/tags/", ""
+          $date = Get-Date -Format "yyyy-MM-dd"
+          $zip = "release_$tag.zip"
+
+          $exeHash      = Get-Content "artifact\sha256\exe.sha256"
+          $jsonHash     = Get-Content "artifact\sha256\patterns.sha256"
+          $manifestHash = Get-Content "artifact\sha256\manifest.sha256"
+          $zipHash      = Get-Content "artifact\sha256\zip.sha256"
+
+          $start = "<!-- LATEST_RELEASE_START -->"
+          $end   = "<!-- LATEST_RELEASE_END -->"
+
+          $block = @"
+          $start
+          ### Latest Release: $tag ($date)
+
+          - Download: [release_$zip](https://github.com/${{ github.repository }}/releases/download/$tag/$zip)
+
+          ### Integrity
+
+          - EXE SHA256: $exeHash
+          - crash_patterns.json SHA256: $jsonHash
+          - Manifest SHA256: $manifestHash
+          - ZIP SHA256: $zipHash
+          $end
+          "@
+
+          $readme = Get-Content README.md -Raw -Encoding utf8
+
+          if ($readme -match "(?s)$start.*?$end") {
+            $readme = $readme -replace "(?s)$start.*?$end", $block
+          } else {
+            $readme = $readme + "`n" + $block
+          }
+
+          Set-Content README.md $readme -Encoding utf8
+
+      - name: Commit README
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add README.md
+          git commit -m "docs: update release ${{ github.ref_name }}" || exit 0
+          git pull --rebase origin master
+          git push origin HEAD:master
