@@ -1,0 +1,184 @@
+{
+    "_comment": "Stingray Crash Analyzer - crash pattern library. Edit builtin_patterns to customize built-in patterns. Add new patterns to patterns[].",
+    "_format": {
+        "id":             "Unique identifier - must match what the code expects for builtin patterns",
+        "name":           "Short crash name shown in the UI",
+        "player_message": "Plain-English explanation for players (no jargon)",
+        "fix":            ["Step 1", "Step 2", "Step 3"],
+        "dev_note":       "Technical note for developers",
+        "confidence":     "HIGH / MED / LOW",
+        "enabled":        "true to enable, false to disable"
+    },
+
+    "builtin_patterns": [
+        {
+            "id":             "SUICIDE_DSTORAGE",
+            "name":           "Engine suicide during DirectStorage streaming",
+            "player_message": "The game detected an internal error while loading assets via DirectStorage and shut itself down. This is often caused by outdated GPU drivers that don't properly support DirectStorage.",
+            "fix": [
+                "Update your GPU drivers to the latest version",
+                "If on AMD: use DDU (Display Driver Uninstaller) to fully clean old drivers first",
+                "Verify game files through Steam",
+                "If the crash persists, disable DirectStorage"
+            ],
+            "dev_note":   "Engine suicide with active DStorage thread - likely DS decompression or IO error",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "SUICIDE_LUA",
+            "name":           "Engine suicide from Lua scripting error",
+            "player_message": "The game detected a scripting error and shut itself down. This can be caused by mods that modify game scripts, or a bug in a game update.",
+            "fix": [
+                "If you have mods installed, remove them and try again",
+                "Verify game files through Steam",
+                "Check the game log file for a Lua error message"
+            ],
+            "dev_note":   "Engine suicide with active Lua thread - check Lua stack and recent script changes",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "SUICIDE_AUDIO",
+            "name":           "Engine suicide during audio playback",
+            "player_message": "The game detected an error in the audio system and shut itself down. This can happen with certain audio devices or driver configurations.",
+            "fix": [
+                "Try setting your audio output to stereo instead of surround sound",
+                "Update your audio drivers",
+                "Try disabling audio enhancements in Windows sound settings",
+                "Check the game log for audio error messages"
+            ],
+            "dev_note":   "Engine suicide with active Wwise thread - check audio event / bank loading",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "SUICIDE_GPU",
+            "name":           "Engine suicide during GPU rendering",
+            "player_message": "The game detected an error in the graphics system and shut itself down. This is most commonly caused by outdated or unstable GPU drivers, or a GPU hardware issue.",
+            "fix": [
+                "Update your GPU drivers to the latest version",
+                "If overclocking your GPU, revert to stock settings",
+                "Try lowering graphics settings",
+                "Check GPU temperature - overheating can cause this"
+            ],
+            "dev_note":   "Engine suicide with active D3D12/GPU driver thread - device lost or driver timeout",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "SUICIDE_GENERIC",
+            "name":           "Engine detected an internal error and shut down",
+            "player_message": "The game detected something unexpected internally and safely shut itself down rather than continuing in a broken state. The engine log file contains the actual error message.",
+            "fix": [
+                "Check the .log file next to the .dmp for the real error",
+                "Verify game files through Steam",
+                "Share the .log AND .dmp files with the 418th"
+            ],
+            "dev_note":   "Generic engine suicide - check engine log for trigger",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "GPU_DRIVER_CRASH",
+            "name":           "GPU driver crashed",
+            "player_message": "The graphics driver crashed inside the game. This is almost always a driver bug or hardware issue, not a game bug.",
+            "fix": [
+                "Update your GPU drivers to the latest version",
+                "Use DDU (Display Driver Uninstaller) to fully clean old drivers first",
+                "If overclocking your GPU or VRAM, revert to stock settings",
+                "Check GPU temperature under load",
+                "If on a laptop, make sure the game is using the dedicated GPU, not the integrated one"
+            ],
+            "dev_note":   "Crash inside GPU driver DLL - not engine code",
+            "confidence": "HIGH",
+            "enabled":    true
+        },
+        {
+            "id":             "DXGI_DEVICE_LOST",
+            "name":           "GPU error: device lost / stopped responding",
+            "player_message": "The GPU stopped responding to the game. This is almost always a driver, hardware, or overheating issue - not a game bug.",
+            "fix": [
+                "Update GPU drivers",
+                "Check GPU temperature - use HWiNFO64 or GPU-Z while gaming",
+                "Revert any GPU overclock",
+                "If the problem persists, run a GPU stress test (FurMark) to check hardware stability"
+            ],
+            "dev_note":   "DXGI device lost / TDR",
+            "confidence": "HIGH",
+            "enabled":    true
+        },
+        {
+            "id":             "STACK_OVERFLOW",
+            "name":           "Stack overflow",
+            "player_message": "The game ran out of call stack space. This is a game bug, not a hardware issue. It typically means a function called itself too many times in a loop.",
+            "fix": [
+                "This is a game bug - please report it with the dump file",
+                "Note exactly what you were doing in-game when it crashed",
+                "Check if it happens consistently in the same situation"
+            ],
+            "dev_note":   "Stack overflow - look for infinite recursion in the crashing thread",
+            "confidence": "HIGH",
+            "enabled":    true
+        },
+        {
+            "id":             "HEAP_CORRUPTION",
+            "name":           "Memory corruption detected",
+            "player_message": "The game detected that its memory was corrupted. This is a game bug. It can be hard to reproduce consistently because the corruption may happen before the crash.",
+            "fix": [
+                "This is a game bug - please report it with the dump file",
+                "Note what you were doing when it crashed - especially any unusual sequences of actions",
+                "If you have mods, try without them first"
+            ],
+            "dev_note":   "Heap corruption - use heap debug allocator to find the stomper",
+            "confidence": "HIGH",
+            "enabled":    true
+        },
+        {
+            "id":             "MOD_CRASH",
+            "name":           "Crash with mods detected",
+            "player_message": "Mods were detected in this crash. Mods can cause crashes that wouldn't otherwise occur. Before reporting this as a game bug, please verify the crash happens without mods installed.",
+            "fix": [
+                "Remove all mods and verify the crash still happens",
+                "If the crash goes away without mods, the mod is the cause",
+                "If it still crashes without mods, please share the new dump with the 418th"
+            ],
+            "dev_note":   "Mods detected - verify crash is reproducible in vanilla before investigation",
+            "confidence": "MED",
+            "enabled":    true
+        },
+        {
+            "id":             "CPP_EXCEPTION",
+            "name":           "Unhandled game error",
+            "player_message": "The game encountered an internal error it didn't know how to handle. This is a game bug. Check the engine log for the error message.",
+            "fix": [
+                "Check the .log file next to the .dmp for the error message",
+                "Share both the .log and .dmp with the 418th",
+                "Note what you were doing when it crashed"
+            ],
+            "dev_note":   "Unhandled C++ exception - check exception type and message in log",
+            "confidence": "HIGH",
+            "enabled":    true
+        }
+    ],
+
+    "patterns": [
+        {
+            "id":             "EXAMPLE_PATTERN",
+            "name":           "Example: my custom crash",
+            "player_message": "This is an example. Replace with your own crash description.",
+            "fix": [
+                "Step one for the player",
+                "Step two for the player"
+            ],
+            "dev_note":   "Notes for the dev team about root cause",
+            "confidence": "MED",
+            "match": {
+                "ex_code":   "0xC0000005",
+                "is_suicide": true,
+                "active_thread_mod_contains": "lua"
+            },
+            "enabled": false
+        }
+    ]
+}
