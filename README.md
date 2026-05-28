@@ -5,9 +5,16 @@ A desktop tool for analyzing `.dmp` minidump files from games built on the **Aut
 ---
 
 <!-- LATEST_RELEASE_START -->
-### Latest Release: —
+### Latest Release: v1.0 (2026-05-28)
 
-No release yet. Check the [Releases](../../releases) page.
+- Download: [release_release_v1.0.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.0/release_v1.0.zip)
+
+### Integrity
+
+- EXE SHA256: 472A791521B237E3D21858951C441573F9026D895BBDFEDDFC42AB20B8094E53
+- crash_patterns.json SHA256: 8D9A46521C669C8012D0BC812C7318B616042A132946A90FBEF91D0AAC5F2108
+- Manifest SHA256: EC53BC7ED8BFB045B5D5905107A70B6EBBDC1D976D76F23FB17B8A62CD78090B
+- ZIP SHA256: B564ADBFF657883D72D732F495A171D7FD8786137CF322FAE58B4ADC716675DD
 <!-- LATEST_RELEASE_END -->
 
 ---
@@ -194,3 +201,4 @@ The CI workflow (`.github/workflows/build.yml`) does this automatically on every
 - Module name detection for game install root uses Steam path conventions. Non-Steam installs may not detect mods correctly.
 - ntdll syscall offsets used for thread state detection are based on a specific Windows version. They degrade gracefully - threads will show as WAITING rather than the specific wait type if the offset does not match.
 - Memory at the crash address is only available if the dump was created with stack memory capture (standard for Stingray). Full memory dumps give more detail in the hex view.
+
