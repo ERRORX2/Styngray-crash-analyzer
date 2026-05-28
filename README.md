@@ -1,6 +1,6 @@
 # Stingray Crash Analyzer
 
-A desktop tool for analyzing `.dmp` minidump files from games built on the **Autodesk Stingray / Bitsquid engine**. Designed for the 418th - gives players and QA a plain-English crash report without needing WinDbg or debug symbols.
+A desktop tool for analyzing `.dmp` minidump files from games built on the **Autodesk Stingray / Bitsquid engine**.
 
 ---
 
