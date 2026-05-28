@@ -202,3 +202,8 @@ The CI workflow (`.github/workflows/build.yml`) does this automatically on every
 - ntdll syscall offsets used for thread state detection are based on a specific Windows version. They degrade gracefully - threads will show as WAITING rather than the specific wait type if the offset does not match.
 - Memory at the crash address is only available if the dump was created with stack memory capture (standard for Stingray). Full memory dumps give more detail in the hex view.
 
+---
+
+## License
+
+MIT License - Developed for the hardware enthusiast and troubleshooting community.
