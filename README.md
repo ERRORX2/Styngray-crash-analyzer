@@ -27,7 +27,7 @@ Download the latest `release_vX.X.zip` from the [Releases](../../releases) page.
 
 ## Features
 
-**Simple View** - The first thing you see. Plain English. No jargon.
+**Simple View** - The first thing you see. Plain English.
 - Identifies known crash patterns automatically
 - Tells the player exactly what to try
 - Detects mods that may have caused the crash
