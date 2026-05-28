@@ -1,0 +1,1 @@
+# Styngray crash analyzer
