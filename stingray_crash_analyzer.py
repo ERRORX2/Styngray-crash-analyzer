@@ -44,6 +44,17 @@ EXCEPTION_CODES = {
     0xC0000409: "STACK_BUFFER_OVERRUN – /GS stack check failed",
     0xC0000602: "ASSERTION_FAILURE – Assertion failed",
     0xE06D7363: "CPP_EXCEPTION – C++ exception (0xE06D7363 = 'msc')",
+    0xC0000006: "IN_PAGE_ERROR – Page fault reading from disk (corrupted install or failing drive)",
+    0xC0000008: "INVALID_HANDLE – Handle used after being closed (use-after-close)",
+    0xC000000D: "INVALID_PARAMETER – Invalid parameter passed to a system call",
+    0xC0000017: "NO_MEMORY / NO_PAGEFILE – Out of virtual address space or pagefile exhausted",
+    0xC000001A: "NOT_MAPPED_VIEW – Memory region is not mapped",
+    0xC0000022: "ACCESS_DENIED – File or registry permission failure (antivirus / UAC)",
+    0xC000009A: "INSUFFICIENT_RESOURCES – OS kernel resource exhaustion",
+    0xC0000353: "INVALID_CRUNTIME_PARAMETER – C runtime security check (_invalid_parameter)",
+    0xC0000420: "ASSERTION_FAILURE – MSVC assert() macro fired in release build",
+    0x80000002: "DATATYPE_MISALIGNMENT – Unaligned memory access (SSE/NEON or ARM)",
+    0x40010005: "DBG_CONTROL_C – Ctrl+C signal (not a real crash; console application)",
 
 }
 
@@ -134,13 +145,70 @@ STINGRAY_PATTERNS = {
                          "Could be: Flow graph event fired on a destroyed unit, "
                          "external event name not registered in the Flow system, "
                          "or a Flow variable node referencing a component that was removed."),
+    "input":            ("Input system crash",         ACCENT2,
+                         "Could be: input callback fired on a destroyed unit, "
+                         "controller hotplug during gameplay causing a dangling device handle, "
+                         "or a key-binding referencing a deleted action."),
+    "ai":               ("AI subsystem crash",         ACCENT2,
+                         "Could be: behavior tree ticking on a destroyed unit, "
+                         "navmesh query on an unloaded level, "
+                         "or a perception event referencing a dead actor."),
+    "navmesh":          ("Navigation mesh crash",      ACCENT2,
+                         "Could be: pathfinding query on a stale navmesh tile, "
+                         "navmesh rebuilt while agents are mid-query, "
+                         "or an agent position that is NaN/inf."),
+    "particles":        ("Particle system crash",      YELLOW,
+                         "Could be: particle emitter update on a destroyed unit, "
+                         "effect spawned at a NaN position, "
+                         "or a particle material referencing an unloaded texture."),
+    "vfx":              ("VFX system crash",           YELLOW,
+                         "Could be: VFX component accessed on a destroyed entity, "
+                         "effect template missing from loaded packages, "
+                         "or VFX tick running after the level has unloaded."),
+    "terrain":          ("Terrain system crash",       ACCENT,
+                         "Could be: height-map sampling at an out-of-bounds coordinate, "
+                         "terrain LOD transition on an unloaded chunk, "
+                         "or a terrain material referencing an unloaded texture."),
+    "camera":           ("Camera system crash",        ACCENT,
+                         "Could be: camera follow-target unit destroyed mid-frame, "
+                         "spring-arm query against invalid geometry, "
+                         "or camera blend from a deleted camera entity."),
+    "hud":              ("HUD / UI crash",             YELLOW,
+                         "Could be: UI widget accessing a destroyed entity or player state, "
+                         "font or texture atlas not loaded when HUD is drawn, "
+                         "or a Flow-driven UI event firing on an unloaded level."),
+    "shader":           ("Shader system crash",        PURPLE,
+                         "Could be: shader permutation not found in the compiled cache, "
+                         "shader constant buffer size mismatch at bind time, "
+                         "or a hot-reload of shaders with an incompatible pipeline state."),
+    "texture":          ("Texture streaming crash",    PURPLE,
+                         "Could be: texture handle dereferenced before streaming is complete, "
+                         "mip-map request on an evicted texture, "
+                         "or a texture atlas rebuilt while a draw call is in flight."),
+    "mesh":             ("Mesh / geometry crash",      ACCENT,
+                         "Could be: mesh LOD switch on a destroyed unit, "
+                         "vertex buffer freed while GPU draw call is in flight, "
+                         "or a skinned mesh with a mismatched skeleton."),
+    "material":         ("Material system crash",      PURPLE,
+                         "Could be: material parameter update on an unloaded material, "
+                         "material referencing a deleted texture or shader, "
+                         "or a material hot-swap during a render pass."),
+    "plugin":           ("Plugin system crash",        ACCENT,
+                         "Could be: plugin DLL version mismatch with the engine, "
+                         "plugin accessing engine internals that changed between builds, "
+                         "or a plugin not properly unregistered before level unload."),
+    "level":            ("Level streaming crash",      ACCENT,
+                         "Could be: level unloaded while objects in it are still being ticked, "
+                         "cross-level object reference not cleared before unload, "
+                         "or streaming trigger fired on a level that failed to load."),
+    "savegame":         ("Save/load system crash",     ACCENT2,
+                         "Could be: save data version mismatch with current build, "
+                         "corrupted save file causing bad pointer reconstruction, "
+                         "or async save completing after the level that owns the data unloaded."),
 }
 
 def parse_minidump(path: str) -> dict:
-    """
-    Pure-Python minidump parser.
-    Extracts: header, streams, exception, modules, system info, threads.
-    """
+
     result = {
         "file": path,
         "_raw_path": path,
@@ -212,7 +280,7 @@ def parse_minidump(path: str) -> dict:
             arch   = struct.unpack_from("<H", data, srva)[0]
             level  = struct.unpack_from("<H", data, srva + 2)[0]
             rev    = struct.unpack_from("<H", data, srva + 4)[0]
-            ncpus  = struct.unpack_from("<H", data, srva + 6)[0]
+            ncpus  = struct.unpack_from("<B", data, srva + 6)[0]
             ptype  = struct.unpack_from("<H", data, srva + 8)[0]
             osmaj  = struct.unpack_from("<I", data, srva + 16)[0]
             osmin  = struct.unpack_from("<I", data, srva + 20)[0]
@@ -292,6 +360,7 @@ def parse_minidump(path: str) -> dict:
                 datasize = struct.unpack_from("<I", data, roff + 8)[0]
                 datarva  = struct.unpack_from("<I", data, roff + 12)[0]
                 result["memory_map"].append((start, datasize, datarva))
+
         if stype == 15 and srva + 24 <= len(data):
             mflags = struct.unpack_from("<I", data, srva)[0]
             pid    = struct.unpack_from("<I", data, srva + 4)[0]
@@ -311,22 +380,40 @@ def parse_minidump(path: str) -> dict:
                 stk_size = struct.unpack_from("<I", data, toff + 32)[0]
                 ctx_size = struct.unpack_from("<I", data, toff + 40)[0]
                 ctx_rva  = struct.unpack_from("<I", data, toff + 44)[0]
-                rip = rsp = 0
+
+                rip = rsp = rax = rcx = rdx = rbx = rbp = rsi = rdi = 0
+                r8 = r9 = r10 = r11 = r12 = r13 = r14 = r15 = 0
                 if ctx_rva + 0x100 <= len(data) and ctx_size >= 0x100:
-                    rip = struct.unpack_from("<Q", data, ctx_rva + 0xF8)[0]
+                    rax = struct.unpack_from("<Q", data, ctx_rva + 0x78)[0]
+                    rcx = struct.unpack_from("<Q", data, ctx_rva + 0x80)[0]
+                    rdx = struct.unpack_from("<Q", data, ctx_rva + 0x88)[0]
+                    rbx = struct.unpack_from("<Q", data, ctx_rva + 0x90)[0]
                     rsp = struct.unpack_from("<Q", data, ctx_rva + 0x98)[0]
+                    rbp = struct.unpack_from("<Q", data, ctx_rva + 0xA0)[0]
+                    rsi = struct.unpack_from("<Q", data, ctx_rva + 0xA8)[0]
+                    rdi = struct.unpack_from("<Q", data, ctx_rva + 0xB0)[0]
+                    r8  = struct.unpack_from("<Q", data, ctx_rva + 0xB8)[0]
+                    r9  = struct.unpack_from("<Q", data, ctx_rva + 0xC0)[0]
+                    r10 = struct.unpack_from("<Q", data, ctx_rva + 0xC8)[0]
+                    r11 = struct.unpack_from("<Q", data, ctx_rva + 0xD0)[0]
+                    r12 = struct.unpack_from("<Q", data, ctx_rva + 0xD8)[0]
+                    r13 = struct.unpack_from("<Q", data, ctx_rva + 0xE0)[0]
+                    r14 = struct.unpack_from("<Q", data, ctx_rva + 0xE8)[0]
+                    r15 = struct.unpack_from("<Q", data, ctx_rva + 0xF0)[0]
+                    rip = struct.unpack_from("<Q", data, ctx_rva + 0xF8)[0]
                 result["threads"].append({
                     "tid": tid, "suspend": suspend, "pri": pri,
                     "rip": rip, "rsp": rsp,
+                    "rax": rax, "rcx": rcx, "rdx": rdx, "rbx": rbx,
+                    "rbp": rbp, "rsi": rsi, "rdi": rdi,
+                    "r8":  r8,  "r9":  r9,  "r10": r10, "r11": r11,
+                    "r12": r12, "r13": r13, "r14": r14, "r15": r15,
                 })
 
     return result
 
 def annotate_frame(mod_name: str, offset: int) -> str:
-    """
-    Return a short human-readable description of what a stack frame represents.
-    Based on module name patterns and known subsystem DLLs.
-    """
+
     n = (mod_name or "").lower()
 
     if n in ("ntdll.dll",):
@@ -413,6 +500,53 @@ def annotate_frame(mod_name: str, offset: int) -> str:
     if "network" in n or "enet" in n or "raknet" in n:
         return "Game networking layer"
 
+    if "concrt140" in n or "msvcp140_1" in n or "msvcp140_2" in n:
+        return "C++ runtime (parallel/STL)"
+    if "vcruntime140_1" in n:
+        return "C/C++ runtime (coroutine support)"
+
+    if "wwise" in n:
+        return "Wwise audio engine / plugin"
+    if "fmodstudio" in n or ("fmod" in n and "64" in n):
+        return "FMOD Studio audio engine"
+    if "xaudio" in n or "x3daudio" in n:
+        return "XAudio2 / X3DAudio (DirectX audio)"
+
+    if "easyanticheat" in n:
+        return "EasyAntiCheat"
+    if "battleye" in n or "beclient" in n:
+        return "BattlEye anti-cheat"
+
+    if "nvapi" in n:
+        return "NVIDIA API (NVAPI) utility layer"
+    if "amd_ags" in n:
+        return "AMD GPU Services (AGS) utility layer"
+
+    if "dxcompiler" in n:
+        return "DirectX shader compiler (DXC)"
+    if n == "dxil.dll":
+        return "DirectX Intermediate Language validator"
+
+    if "winpixeventruntime" in n:
+        return "WinPIX GPU event runtime (profiler)"
+
+    if "playfabmultiplayerwin" in n:
+        return "PlayFab multiplayer SDK"
+    if "partywin" in n:
+        return "Xbox Party SDK"
+    if "xinput" in n:
+        return "XInput (Xbox controller)"
+    if n in ("hid.dll", "hidclass.dll"):
+        return "Windows HID (input device)"
+
+    if "reshade" in n:
+        return "ReShade post-processing (D3D hook)"
+    if "minhook" in n or "minhook64" in n:
+        return "MinHook (function hooking library — possible mod injection)"
+
+    if "crs-client" in n:
+        return "Arrowhead crash reporter"
+
     if n.endswith(".exe"):
         return "Game engine / application code"
 
@@ -421,57 +555,9 @@ def annotate_frame(mod_name: str, offset: int) -> str:
 
     return ""
 
-    """
-    Scan RSP upward looking for return addresses that land in known modules.
-    Returns list of (addr, module_short_name, offset).
-    """
-    modules = parsed.get("modules", [])
-    raw_path = parsed.get("_raw_path")
-    if not raw_path or not rsp:
-        return []
-    try:
-        with open(raw_path, "rb") as f:
-            raw = f.read()
-    except Exception:
-        return []
-
-    def read_u64(addr):
-        for (start, msz, rva) in parsed.get("memory_map", []):
-            if start <= addr < start + msz:
-                off = addr - start
-                if rva + off + 8 <= len(raw):
-                    return struct.unpack_from("<Q", raw, rva + off)[0]
-        return None
-
-    def addr_to_mod(addr):
-        for m in modules:
-            try:
-                base = int(m["base"], 16)
-                if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name, addr - base
-            except Exception:
-                pass
-        return None, 0
-
-    frames = []
-    ptr = rsp
-    scanned = 0
-    while len(frames) < max_frames and scanned < 0x2000:
-        val = read_u64(ptr)
-        if val is None:
-            break
-        mod, off = addr_to_mod(val)
-        if mod:
-            frames.append((val, mod, off))
-        ptr += 8
-        scanned += 8
-    return frames
 
 def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
-    """
-    Scan RSP upward looking for return addresses that land in known modules.
-    Returns list of (addr, module_short_name, offset).
-    """
+
     modules  = parsed.get("modules", [])
     raw_path = parsed.get("_raw_path")
     if not raw_path or not rsp:
@@ -515,9 +601,7 @@ def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
     return frames
 
 def analyse_threads(parsed: dict) -> list:
-    """
-    Returns one dict per thread with its state and what it was doing.
-    """
+
     NTDLL_WAITS = {
         0x161B14: ("NtWaitForSingleObject",         "Waiting on event / mutex / semaphore"),
         0x1656E4: ("NtWaitForWorkViaWorkerFactory",  "Thread pool worker - idle"),
@@ -641,8 +725,8 @@ def analyse_threads(parsed: dict) -> list:
     result.sort(key=sort_key)
     return result
 
-def quick_patterns(parsed: dict) -> list[tuple[str, str, str]]:
-    """Rule-based hints before AI: returns list of (label, detail, colour)."""
+def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
+
     hints = []
     modules   = parsed.get("modules", [])
     all_names = " ".join(Path(m["name"]).name.lower() for m in modules)
@@ -835,15 +919,7 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str]]:
     return hints
 
 def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
-    """
-    Tries to determine the actual root cause of the crash by ignoring
-    false flags (engine suicide, crash handler) and looking at real signals:
-    - Which non-handler game thread was active at crash time
-    - What the faulting address tells us
-    - What the exception parameters mean
-    - Register state of the active game thread
-    Returns list of (confidence, finding, detail) sorted best-first.
-    """
+
     findings = []
 
     ex      = parsed.get("exception", {})
@@ -953,8 +1029,9 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         pass
 
     for t, mod, off, full in active_game_threads:
-        rax = t.get("rax", 0)
+
         rcx = t.get("rcx", 0)
+        rax = t.get("rax", 0)
         rdx = t.get("rdx", 0)
         this_null = rcx < 0x1000
         findings.append({"conf": "MED" if not this_null else "HIGH",
@@ -979,7 +1056,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
     return findings
 
 def build_summary(parsed: dict) -> str:
-    """Build a human-readable text summary."""
+
     lines = []
 
     ex_early = parsed.get("exception")
@@ -1057,7 +1134,7 @@ def build_summary(parsed: dict) -> str:
     return "\n".join(lines)
 
 def read_virtual_memory(parsed: dict, addr: int, size: int = 128) -> "bytes | None":
-    """Read bytes from virtual address using the dump's memory map."""
+
     raw_data_path = parsed.get("_raw_path")
     if not raw_data_path:
         return None
@@ -1074,9 +1151,7 @@ def read_virtual_memory(parsed: dict, addr: int, size: int = 128) -> "bytes | No
     return None
 
 def format_hex_dump(data: bytes, base_addr: int, highlight_addr: "int | None" = None) -> list:
-    """
-    Returns list of (addr_str, hex_str, ascii_str, is_highlighted) per 16-byte row.
-    """
+
     rows = []
     for i in range(0, len(data), 16):
         chunk     = data[i:i+16]
@@ -1087,17 +1162,15 @@ def format_hex_dump(data: bytes, base_addr: int, highlight_addr: "int | None" = 
         rows.append((f"0x{row_addr:016X}", hex_part, ascii_part, is_hi))
     return rows
 
-def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
-    """
-    Decode the x64 instruction at the crash address and determine
-    whether the crash was intentional (engine suicide) or accidental.
+_REG_NAMES_EXT = {
+    0: "AX",  1: "CX",  2: "DX",  3: "BX",
+    4: "SP",  5: "BP",  6: "SI",  7: "DI",
+    8: "R8",  9: "R9",  10: "R10", 11: "R11",
+    12: "R12", 13: "R13", 14: "R14", 15: "R15",
+}
 
-    Returns dict with:
-      is_suicide   - True if instruction proves intentional crash
-      instruction  - Human-readable instruction string
-      explanation  - Plain-English meaning
-      confidence   - HIGH / MED / LOW
-    """
+def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
+
     if not mem or len(mem) < 4:
         return {"is_suicide": False, "instruction": "?", "explanation": "Could not read instruction bytes", "confidence": "LOW"}
 
@@ -1192,20 +1265,86 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
         mod = (modrm >> 6) & 0x3
         reg = (modrm >> 3) & 0x7
         rm  = modrm & 0x7
-        REG_NAMES = {0:"AX",1:"CX",2:"DX",3:"BX",4:"SP",5:"BP",6:"SI",7:"DI"}
-        prefix = "R" if rex & 0x8 else "E"
-        dst_reg = REG_NAMES.get(reg, f"r{reg}")
-        if mod == 0:
-            base_reg = REG_NAMES.get(rm, f"r{rm}")
-            return {
-                "is_suicide": False,
-                "instruction": f"MOV {prefix}{dst_reg}, [{prefix}{base_reg}]",
-                "explanation": (
-                    f"Read from register {prefix}{base_reg} which was null. "
-                    f"This is a real null pointer read - the object pointer was null or already freed."
-                ),
-                "confidence": "HIGH",
-            }
+
+        rex_w = (rex >> 3) & 0x1
+        rex_r = (rex >> 2) & 0x1
+        rex_x = (rex >> 1) & 0x1
+        rex_b = (rex >> 0) & 0x1
+
+        dst_idx = reg + (8 if rex_r else 0)
+        dst_pfx = "" if dst_idx > 7 else ("R" if rex_w else "E")
+        dst_reg = dst_pfx + _REG_NAMES_EXT.get(dst_idx, f"r{dst_idx}")
+
+        def _decode_mem_op(mod, rm, idx):
+            """Decode a ModRM memory operand, handling SIB and all displacement sizes.
+            Returns (operand_str, new_idx, base_description_for_explanation)."""
+            has_sib  = (rm == 4 and mod != 3)
+            disp     = 0
+            base_str = ""
+
+            if has_sib and idx < len(b):
+                sib       = b[idx]; idx += 1
+                sib_scale = (sib >> 6) & 0x3
+                sib_index = (sib >> 3) & 0x7
+                sib_base  = sib & 0x7
+                scale_val = 1 << sib_scale
+
+                actual_base  = sib_base  + (8 if rex_b else 0)
+                actual_index = sib_index + (8 if rex_x else 0)
+
+                no_base  = (sib_base == 5 and mod == 0)
+                no_index = (sib_index == 4)
+
+                b_name    = _REG_NAMES_EXT.get(actual_base,  f"r{actual_base}")
+                i_name    = _REG_NAMES_EXT.get(actual_index, f"r{actual_index}")
+                b_pfx     = "" if actual_base  > 7 else "R"
+                i_pfx     = "" if actual_index > 7 else "R"
+                scale_str = f"*{scale_val}" if scale_val > 1 else ""
+
+                if no_base and no_index:
+                    disp32   = struct.unpack_from("<I", bytes(b[idx:idx+4]))[0] if idx+4 <= len(b) else 0
+                    idx     += 4
+                    base_str = f"0x{disp32:X}"
+                elif no_base:
+                    disp32   = struct.unpack_from("<I", bytes(b[idx:idx+4]))[0] if idx+4 <= len(b) else 0
+                    idx     += 4
+                    base_str = f"0x{disp32:X}+{i_pfx}{i_name}{scale_str}"
+                elif no_index:
+                    base_str = f"{b_pfx}{b_name}"
+                else:
+                    base_str = f"{b_pfx}{b_name}+{i_pfx}{i_name}{scale_str}"
+            else:
+                actual_rm = rm + (8 if rex_b else 0)
+                if mod == 0 and rm == 5:
+                    base_str = "RIP"
+                else:
+                    rm_pfx   = "" if actual_rm > 7 else "R"
+                    base_str = rm_pfx + _REG_NAMES_EXT.get(actual_rm, f"r{actual_rm}")
+
+            if mod == 1 and idx < len(b):
+                disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]; idx += 1
+            elif mod == 2 and idx + 4 <= len(b):
+                disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
+
+            if disp > 0:
+                operand = f"[{base_str}+0x{disp:X}]"
+            elif disp < 0:
+                operand = f"[{base_str}-0x{abs(disp):X}]"
+            else:
+                operand = f"[{base_str}]"
+            return operand, idx, base_str
+
+        operand, idx, base_str = _decode_mem_op(mod, rm, idx)
+        return {
+            "is_suicide": False,
+            "instruction": f"MOV {dst_reg}, {operand}",
+            "explanation": (
+                f"Read through {operand}. "
+                f"The base address ({base_str}) was null or near-null at crash time — "
+                f"the object pointer was null, already freed, or never initialised."
+            ),
+            "confidence": "HIGH",
+        }
 
     if opcode == 0xFF and idx < len(b):
         modrm = b[idx]
@@ -1233,6 +1372,142 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             "confidence": "HIGH",
         }
 
+    if opcode == 0xC7 and idx < len(b):
+        modrm = b[idx]; idx += 1
+        mod = (modrm >> 6) & 0x3
+        rm  = modrm & 0x7
+        is_abs_null = (mod == 0 and rm == 4 and idx < len(b) and
+                       b[idx] == 0x25 and idx + 5 <= len(b) and
+                       struct.unpack_from("<I", bytes(b[idx+1:idx+5]))[0] == 0)
+        if is_abs_null:
+            return {
+                "is_suicide": True,
+                "instruction": "MOV [0x00000000], imm32",
+                "explanation": (
+                    "The engine explicitly wrote to absolute address 0x0 using MOV [imm32], imm32. "
+                    "The destination is hardcoded as null — this is an intentional Stingray engine suicide."
+                ),
+                "confidence": "HIGH",
+            }
+        REG_NAMES = {0:"AX",1:"CX",2:"DX",3:"BX",4:"SP",5:"BP",6:"SI",7:"DI"}
+        rex_b = (rex >> 0) & 0x1
+        actual_rm = rm + (8 if rex_b else 0)
+        base_str = _REG_NAMES_EXT.get(actual_rm, f"r{actual_rm}")
+        pfx = "" if actual_rm > 7 else "R"
+        if mod == 1 and idx < len(b):
+            disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]; idx += 1
+            operand = f"[{pfx}{base_str}+0x{disp:X}]" if disp >= 0 else f"[{pfx}{base_str}-0x{abs(disp):X}]"
+        elif mod == 2 and idx + 4 <= len(b):
+            disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
+            operand = f"[{pfx}{base_str}+0x{disp:X}]" if disp >= 0 else f"[{pfx}{base_str}-0x{abs(disp):X}]"
+        else:
+            operand = f"[{pfx}{base_str}]"
+        return {
+            "is_suicide": False,
+            "instruction": f"MOV {operand}, imm32",
+            "explanation": (
+                f"Immediate value written to {operand}. "
+                f"If {pfx}{base_str} was null at crash time this is a null pointer write — "
+                f"a struct member assignment on a null or destroyed object."
+            ),
+            "confidence": "HIGH",
+        }
+
+    if opcode == 0x83 and idx < len(b):
+        modrm = b[idx]; idx += 1
+        mod = (modrm >> 6) & 0x3
+        op3 = (modrm >> 3) & 0x7
+        rm  = modrm & 0x7
+        OP3_NAMES = {0:"ADD",1:"OR",2:"ADC",3:"SBB",4:"AND",5:"SUB",6:"XOR",7:"CMP"}
+        op_name = OP3_NAMES.get(op3, f"op{op3}")
+        rex_b = (rex >> 0) & 0x1
+        actual_rm = rm + (8 if rex_b else 0)
+        base_str = _REG_NAMES_EXT.get(actual_rm, f"r{actual_rm}")
+        pfx = "" if actual_rm > 7 else "R"
+        if mod == 1 and idx < len(b):
+            disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]; idx += 1
+            operand = f"[{pfx}{base_str}+0x{disp:X}]" if disp >= 0 else f"[{pfx}{base_str}-0x{abs(disp):X}]"
+        elif mod == 0:
+            operand = f"[{pfx}{base_str}]"
+        else:
+            operand = f"[{pfx}{base_str}+...]"
+        imm = b[idx] if idx < len(b) else 0
+        return {
+            "is_suicide": False,
+            "instruction": f"{op_name} {operand}, 0x{imm:02X}",
+            "explanation": (
+                f"Arithmetic operation ({op_name}) on memory at {operand}. "
+                f"If {pfx}{base_str} was null at crash time, this is a field access "
+                f"on a null or destroyed object."
+            ),
+            "confidence": "HIGH",
+        }
+
+    if opcode == 0x0F and idx < len(b):
+        ext = b[idx]; idx += 1
+        SSE_MOVES = {0x28: "MOVAPS", 0x29: "MOVAPS", 0x10: "MOVUPS", 0x11: "MOVUPS"}
+        if ext in SSE_MOVES:
+            mnemonic = SSE_MOVES[ext]
+            is_store = ext in (0x29, 0x11)
+            if idx < len(b):
+                modrm = b[idx]; idx += 1
+                mod = (modrm >> 6) & 0x3
+                reg = (modrm >> 3) & 0x7
+                rm  = modrm & 0x7
+                rex_r = (rex >> 2) & 0x1
+                rex_b = (rex >> 0) & 0x1
+                xmm_idx = reg + (8 if rex_r else 0)
+                xmm_reg = f"XMM{xmm_idx}"
+                actual_rm = rm + (8 if rex_b else 0)
+                pfx = "" if actual_rm > 7 else "R"
+                base_str = _REG_NAMES_EXT.get(actual_rm, f"r{actual_rm}")
+                if mod == 1 and idx < len(b):
+                    disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]
+                    mem_op = f"[{pfx}{base_str}+0x{disp:X}]" if disp >= 0 else f"[{pfx}{base_str}-0x{abs(disp):X}]"
+                elif mod == 0:
+                    mem_op = f"[{pfx}{base_str}]"
+                else:
+                    mem_op = f"[{pfx}{base_str}+...]"
+                instr = f"{mnemonic} {mem_op}, {xmm_reg}" if is_store else f"{mnemonic} {xmm_reg}, {mem_op}"
+                align_note = " MOVAPS requires 16-byte alignment — misalignment also causes this crash." if "MOVAPS" in mnemonic else ""
+                return {
+                    "is_suicide": False,
+                    "instruction": instr,
+                    "explanation": (
+                        f"SSE {'store to' if is_store else 'load from'} {mem_op}. "
+                        f"If {pfx}{base_str} was null at crash time, this is a null pointer "
+                        f"{'write' if is_store else 'read'} in a SIMD operation.{align_note}"
+                    ),
+                    "confidence": "HIGH",
+                }
+        return {
+            "is_suicide": False,
+            "instruction": f"0F {ext:02X} ...",
+            "explanation": "Two-byte instruction at crash site - manual analysis needed.",
+            "confidence": "LOW",
+        }
+
+    if opcode in (0xF3, 0xF2) and idx < len(b):
+        rep_name = "REP" if opcode == 0xF3 else "REPNE"
+        next_op = b[idx]
+        STRING_OPS = {0xA4:"MOVSB", 0xA5:"MOVSD/Q", 0xA6:"CMPSB", 0xA7:"CMPSD/Q",
+                      0xAA:"STOSB", 0xAB:"STOSD/Q", 0xAE:"SCASB", 0xAF:"SCASD/Q"}
+        inner_op = STRING_OPS.get(next_op, f"op 0x{next_op:02X}")
+        is_copy  = next_op in (0xA4, 0xA5)
+        is_set   = next_op in (0xAA, 0xAB)
+        if is_copy:
+            detail = "Memory copy (memcpy equivalent). RSI=source, RDI=destination, RCX=count. One of these was null."
+        elif is_set:
+            detail = "Memory set (memset equivalent). RDI=destination, RCX=count. Destination was null."
+        else:
+            detail = "String/memory operation. Check RSI, RDI, RCX registers for null pointer."
+        return {
+            "is_suicide": False,
+            "instruction": f"{rep_name} {inner_op}",
+            "explanation": detail,
+            "confidence": "HIGH",
+        }
+
     return {
         "is_suicide": False,
         "instruction": f"opcode 0x{opcode:02X} ...",
@@ -1240,93 +1515,8 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
         "confidence": "LOW",
     }
 
-    """Build a human-readable text summary."""
-    lines = []
-
-    ex_early = parsed.get("exception")
-    if ex_early:
-        try:
-            if int(ex_early["code"], 16) == 0xC0000005:
-                lines.append("╔══════════════════════════════════════════════════╗")
-                lines.append("║  ⚠  FALSE FLAG - ENGINE SUICIDE  ⚠               ║")
-                lines.append("║  0xC0000005: Stingray killed itself intentionally. ║")
-                lines.append("║  This is NOT the root cause of the crash.        ║")
-                lines.append("║  Check the .log file next to the .dmp instead.   ║")
-                lines.append("╚══════════════════════════════════════════════════╝")
-                lines.append("")
-        except Exception:
-            pass
-
-    lines.append(f"File      : {parsed['file']}")
-    lines.append(f"Size      : {parsed.get('size_mb', '?') } MB")
-    lines.append(f"Version   : {parsed.get('version', '?')}")
-    lines.append(f"Timestamp : {parsed.get('timestamp', '?')}")
-    lines.append(f"Streams   : {parsed.get('stream_count', 0)}")
-    lines.append(f"Threads   : {len(parsed.get('threads', []))}")
-    if "process_id" in parsed:
-        lines.append(f"PID       : {parsed['process_id']}")
-
-    si = parsed.get("system_info", {})
-    if si:
-        lines.append("")
-        lines.append("── SYSTEM INFO ─────────────────────────────────────")
-        lines.append(f"  Architecture : {si.get('arch', '?')}")
-        lines.append(f"  CPU count    : {si.get('cpu_count', '?')}")
-        lines.append(f"  OS version   : {si.get('os_version', '?')}")
-
-    ex = parsed.get("exception")
-    if ex:
-        lines.append("")
-        lines.append("── EXCEPTION ───────────────────────────────────────")
-        lines.append(f"  Code    : {ex['code']}")
-        lines.append(f"  Meaning : {ex['code_desc']}")
-        lines.append(f"  Address : {ex['address']}")
-        lines.append(f"  Thread  : {ex['thread_id']}")
-        if ex.get("params"):
-            lines.append(f"  Params  : {', '.join(ex['params'])}")
-        crash_addr = int(ex['address'], 16)
-        crash_mod  = None
-        for m in parsed.get("modules", []):
-            try:
-                base = int(m["base"], 16)
-                if base <= crash_addr < base + m["size"]:
-                    offset = crash_addr - base
-                    crash_mod = f"{Path(m['name']).name}  +0x{offset:X}"
-                    break
-            except Exception:
-                pass
-        lines.append(f"  In      : {crash_mod or '(address outside all known modules)'}")
-    else:
-        lines.append("")
-        lines.append("── EXCEPTION : none found ──────────────────────────")
-
-    mods = parsed.get("modules", [])
-    if mods:
-        lines.append("")
-        lines.append(f"── MODULES ({len(mods)}) ──────────────────────────────────")
-        for m in mods[:30]:
-            name = Path(m["name"]).name if m["name"] else "?"
-            lines.append(f"  {name:<40} base={m['base']}  size={m['size']:,}")
-        if len(mods) > 30:
-            lines.append(f"  … and {len(mods)-30} more")
-
-    if parsed.get("parse_errors"):
-        lines.append("")
-        lines.append("── PARSE ERRORS ────────────────────────────────────")
-        for e in parsed["parse_errors"]:
-            lines.append(f"  ⚠  {e}")
-
-    return "\n".join(lines)
-
 def detect_mods(parsed: dict) -> dict:
-    """
-    Detects signs of mods being loaded by looking at:
-    1. DLLs loaded from outside the game install directory
-    2. DLLs loaded from Steam Workshop paths
-    3. Known mod manager footprints (Nexus, Vortex, MO2, etc.)
-    4. Suspicious AppData paths
-    Returns dict with: has_mods, confidence, indicators
-    """
+
     modules = parsed.get("modules", [])
     indicators = []
 
@@ -1365,6 +1555,22 @@ def detect_mods(parsed: dict) -> dict:
         "playfabmultiplayerwin.dll", "partywin.dll",
         "crs-client.dll",
         "npggnt64.des", "npsc64.des",
+        "wwise_pluginw64_release.dll", "wwise_pluginw64_debug.dll",
+        "auroheadphone_w64r.dll", "akorthographicverb_w64r.dll",
+        "fmodstudio64.dll", "fmodstudioL64.dll", "fmod64.dll", "fmodL64.dll",
+        "physxdevice64.dll", "physx3_x64.dll", "physx3common_x64.dll",
+        "nvphysxgpu64.dll",
+        "level_generation_pluginw64_release.dll",
+        "level_generation_pluginw64_debug.dll",
+        "easyanticheat.dll", "easyanticheat_launcher.dll",
+        "dxcompiler.dll", "dxil.dll", "d3d12core.dll",
+        "nvapi64.dll", "amd_ags_x64.dll",
+        "winpixeventruntime.dll",
+        "xaudio2_9.dll", "xaudio2_8.dll", "x3daudio1_7.dll",
+        "mfplat.dll", "mfreadwrite.dll",
+        "concrt140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "vcruntime140_1.dll",
+        "playfabmultiplayerwin.dll", "partywin.dll",
     }
 
     MOD_MANAGER_PATHS = {
@@ -1379,6 +1585,14 @@ def detect_mods(parsed: dict) -> dict:
         "\\workshop\\":     "Steam Workshop mod",
         "\\addons\\":       "Addons folder",
         "\\override\\":     "Override folder (Stingray mod path)",
+        "\\patch\\":         "Patch folder (common mod override location)",
+        "\\content\\":       "Content override folder",
+        "\\custom\\":        "Custom content folder",
+        "nexusmods":        "Nexus Mods",
+        "modengine2":       "ModEngine2 (Souls modding framework)",
+        "reshade":          "ReShade (post-processing / D3D hook)",
+        "minhook":          "MinHook (function hooking - common mod injection vector)",
+        "\\xinput\\":        "XInput hook (common mod injection point)",
     }
 
     for m in modules:
@@ -1444,7 +1658,7 @@ def detect_mods(parsed: dict) -> dict:
 PATTERN_FILE = Path(__file__).parent / "crash_patterns.json"
 
 def _load_pattern_file() -> dict:
-    """Load crash_patterns.json, returning the full dict or empty structure."""
+
     if not PATTERN_FILE.exists():
         return {"builtin_patterns": [], "patterns": []}
     try:
@@ -1455,15 +1669,12 @@ def _load_pattern_file() -> dict:
         return {"builtin_patterns": [], "patterns": []}
 
 def load_custom_patterns() -> list:
-    """Load user-defined patterns from the 'patterns' array in crash_patterns.json."""
+
     data = _load_pattern_file()
     return [p for p in data.get("patterns", []) if p.get("enabled", True)]
 
 def get_builtin_override(pattern_id: str) -> "dict | None":
-    """
-    Return the JSON override for a built-in pattern if it exists and is enabled.
-    This lets the JSON file override the text of built-in patterns.
-    """
+
     data = _load_pattern_file()
     for p in data.get("builtin_patterns", []):
         if p.get("id") == pattern_id:
@@ -1474,7 +1685,7 @@ def get_builtin_override(pattern_id: str) -> "dict | None":
 
 def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
                            mods: dict) -> "dict | None":
-    """Try user-defined patterns from crash_patterns.json."""
+
     patterns = load_custom_patterns()
     if not patterns:
         return None
@@ -1551,12 +1762,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
     return None
 
 def _builtin(pattern_id: str, default: dict) -> "dict | None":
-    """
-    Return the pattern for pattern_id.
-    If crash_patterns.json has an override, use that text.
-    If the JSON entry has enabled=false, return None (suppress the pattern).
-    Falls back to hardcoded default.
-    """
+
     override = get_builtin_override(pattern_id)
     if override is None and _load_pattern_file().get("builtin_patterns"):
         return default
@@ -1570,11 +1776,7 @@ def _builtin(pattern_id: str, default: dict) -> "dict | None":
 
 def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                     mods: dict, rootcause: list) -> "dict | None":
-    """
-    Try each known crash pattern against the dump.
-    Custom patterns (crash_patterns.json) are tried first.
-    Returns the first matching pattern dict, or None.
-    """
+
     custom = _match_custom_patterns(parsed, decoded_instr, mods)
     if custom:
         return custom
@@ -1615,7 +1817,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                      if Path(m["name"]).name == mod_name), "").lower().replace("/", "\\")
 
     def is_game_mod(mod_name: str) -> bool:
-        """True if this module is game-owned (not system, not crash handler)."""
+
         if not mod_name:
             return False
         if mod_name.lower() in CRASH_HANDLERS:
@@ -1624,11 +1826,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
         return not any(full.startswith(p) for p in SYSTEM_PREFIXES)
 
     def build_active_subsystems() -> set:
-        """
-        Walk stack frames of every non-system, non-handler thread to find
-        which subsystems were on the stack at crash time.
-        Returns a set of lowercase keywords found in module names on those stacks.
-        """
+
         subsystems: set = set()
         raw_path = parsed.get("_raw_path")
         if not raw_path:
@@ -1658,9 +1856,6 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             rip = t.get("rip", 0)
             rsp = t.get("rsp", 0)
             rip_mod = mod_for_addr(rip)
-
-            if rip_mod and not is_game_mod(rip_mod):
-                pass
 
             if rip_mod and rip_mod.lower() in CRASH_HANDLERS:
                 continue
@@ -1899,13 +2094,159 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             "confidence": "HIGH",
         })
 
+    if ex_code == 0xC000001D:
+        return _builtin("ILLEGAL_INSTR", {
+            "id":   "ILLEGAL_INSTR",
+            "name": "Illegal CPU instruction",
+            "player_message": (
+                "The game tried to execute an instruction your CPU doesn't support, "
+                "or the game code itself was corrupted. "
+                "This can also happen if the game requires a CPU feature you don't have."
+            ),
+            "fix": [
+                "Verify game files through Steam",
+                "Check if your CPU meets the minimum requirements",
+                "Update Windows and your BIOS/UEFI firmware",
+                "If using an emulator or VM, switch to native hardware",
+            ],
+            "dev_note": "ILLEGAL_INSTRUCTION (0xC000001D) - often __debugbreak/assert or AVX mismatch",
+            "confidence": "HIGH",
+        })
+
+    if ex_code == 0xC0000135:
+        return _builtin("DLL_NOT_FOUND", {
+            "id":   "DLL_NOT_FOUND",
+            "name": "Required DLL not found",
+            "player_message": (
+                "The game could not find a required system or middleware DLL. "
+                "This is usually a missing Visual C++ or DirectX runtime."
+            ),
+            "fix": [
+                "Install the latest Visual C++ Redistributable (both x64 and x86) from Microsoft",
+                "Install DirectX End-User Runtime from Microsoft",
+                "Verify game files through Steam",
+                "Check Windows Event Viewer for the exact DLL name that failed to load",
+            ],
+            "dev_note": "STATUS_DLL_NOT_FOUND - check Event Viewer for the missing DLL name",
+            "confidence": "HIGH",
+        })
+
+    if ex_code == 0xC0000142:
+        return _builtin("DLL_INIT_FAILED", {
+            "id":   "DLL_INIT_FAILED",
+            "name": "DLL failed to initialise",
+            "player_message": (
+                "A required library failed to start up. "
+                "This is often caused by a corrupted install or a missing dependency."
+            ),
+            "fix": [
+                "Verify game files through Steam",
+                "Reinstall Visual C++ Redistributables",
+                "Try a clean boot (disable startup programs) to rule out conflicts",
+                "Temporarily disable antivirus and try again",
+            ],
+            "dev_note": "STATUS_DLL_INIT_FAILED - DllMain returned FALSE; check dep chain",
+            "confidence": "HIGH",
+        })
+
+    if ex_code == 0xC0000006:
+        return _builtin("IN_PAGE_ERROR", {
+            "id":   "IN_PAGE_ERROR",
+            "name": "Disk read failure (corrupt install or failing drive)",
+            "player_message": (
+                "Windows could not read a game file from disk when it was needed. "
+                "This usually means corrupted game files or a failing storage device."
+            ),
+            "fix": [
+                "Verify game files through Steam",
+                "Run chkdsk on your drive (chkdsk C: /f in admin cmd)",
+                "Check your drive health with CrystalDiskInfo",
+                "If on an HDD, consider moving the game to an SSD",
+            ],
+            "dev_note": "STATUS_IN_PAGE_ERROR - page fault on a memory-mapped file; likely disk I/O error",
+            "confidence": "HIGH",
+        })
+
+    _purecall_mods = {"vcruntime140.dll", "ucrtbase.dll", "msvcrt.dll"}
+    if crash_mod and crash_mod.lower() in _purecall_mods and ex_code == 0xC0000005:
+        return _builtin("PURE_VIRTUAL_CALL", {
+            "id":   "PURE_VIRTUAL_CALL",
+            "name": "Pure virtual function call (C++ object destroyed too early)",
+            "player_message": (
+                "The game tried to call a function on an object that was already destroyed. "
+                "This is a game bug — a C++ object was used after its lifetime ended."
+            ),
+            "fix": [
+                "This is a game bug — please report it with the dump file",
+                "Note what you were doing when it crashed (especially rapid state changes)",
+                "Check if it happens consistently",
+            ],
+            "dev_note": "Crash in vcruntime/_purecall with AV - pure virtual call on destroyed object",
+            "confidence": "HIGH",
+        })
+
+    if (ex_code == 0xC0000005 and len(params) >= 2
+            and params[0] == "0x1"
+            and fault_addr < 0x10000
+            and not is_suicide):
+        return _builtin("NULL_DEREF_WRITE", {
+            "id":   "NULL_DEREF_WRITE",
+            "name": "Null pointer write — destroyed or uninitialised object",
+            "player_message": (
+                "The game tried to write to memory through a null or invalid pointer. "
+                "This is a game bug — an object was used after being destroyed, "
+                "or was never properly initialised."
+            ),
+            "fix": [
+                "This is a game bug — please report it with the dump file",
+                "Share both the .dmp and the .log file",
+                "Note exactly what you were doing when it crashed",
+            ],
+            "dev_note": "AV write to near-null address - use-after-free or uninit pointer write",
+            "confidence": "HIGH",
+        })
+
+    if is_suicide:
+        active = build_active_subsystems()
+        if any("network" in s or "enet" in s or "raknet" in s for s in active):
+            return _builtin("SUICIDE_NETWORK", {
+                "id":   "SUICIDE_NETWORK",
+                "name": "Engine suicide during network operation",
+                "player_message": (
+                    "The game detected a network error and shut itself down. "
+                    "This can happen during connection drops, host migration, "
+                    "or if the game server sends unexpected data."
+                ),
+                "fix": [
+                    "Check your internet connection stability",
+                    "Try a wired connection instead of Wi-Fi",
+                    "Check the game log for network error messages",
+                    "Try again — intermittent network issues often resolve themselves",
+                ],
+                "dev_note": "Engine suicide with network DLL on active stack - packet error or RPC on dead object",
+                "confidence": "MED",
+            })
+        if any("physx" in s or "physics" in s or "nvphys" in s for s in active):
+            return _builtin("SUICIDE_PHYSICS", {
+                "id":   "SUICIDE_PHYSICS",
+                "name": "Engine suicide during physics simulation",
+                "player_message": (
+                    "The game detected a physics simulation error and shut itself down. "
+                    "This can happen with unusual in-game configurations or collisions."
+                ),
+                "fix": [
+                    "Check the game log for physics error messages",
+                    "Verify game files through Steam",
+                    "Note what was happening in-game (large explosion? ragdoll?)",
+                ],
+                "dev_note": "Engine suicide with PhysX on active stack - NaN transform or destroyed actor",
+                "confidence": "MED",
+            })
+
     return None
 
 def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dict | None") -> dict:
-    """
-    Builds a plain-English crash report for non-technical users.
-    Returns dict with: headline, what_happened, what_was_doing, active_subsystems, advice
-    """
+
     ex       = parsed.get("exception", {})
     modules  = parsed.get("modules", [])
     threads  = parsed.get("threads", [])
@@ -1996,6 +2337,16 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         "nvwgf":        "NVIDIA GPU driver",
         "network":      "Game networking",
         "game.dll":     "Game logic",
+        "physx":        "PhysX physics",
+        "easyanticheat":"EasyAntiCheat anti-cheat",
+        "battleye":     "BattlEye anti-cheat",
+        "playfab":      "PlayFab online services",
+        "partywin":     "Xbox Party SDK",
+        "level_generation": "Level generation / proc-gen",
+        "wwise_plugin": "Wwise audio plugin",
+        "crs-client":   "Arrowhead crash reporter",
+        "reshade":      "ReShade post-processing",
+        "minhook":      "MinHook (mod injection)",
     }
 
     active_subsystems = []
@@ -2153,6 +2504,7 @@ class CrashAnalyzer(tk.Tk):
         if not path:
             return
         self._file_var.set(path)
+        self._open_btn.config(state="disabled")
         self._status("Parsing minidump …", busy=True)
 
         def _work():
@@ -2178,6 +2530,7 @@ class CrashAnalyzer(tk.Tk):
                 self.after(0, lambda: self._display_results(parsed, summary, hints, rootcause, plain, mods))
             except Exception as e:
                 self.after(0, lambda e=e: self._status(f"Parse error: {e}", busy=False))
+                self.after(0, lambda: self._open_btn.config(state="normal"))
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -2288,7 +2641,7 @@ class CrashAnalyzer(tk.Tk):
         canvas.configure(scrollregion=canvas.bbox("all"))
 
     def _bind_scroll(self, canvas: tk.Canvas) -> None:
-        """Bind mousewheel scroll to a canvas, activating on hover."""
+
         def _on_enter(e):
             canvas.bind_all("<MouseWheel>",      lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
             canvas.bind_all("<Button-4>",        lambda e: canvas.yview_scroll(-1, "units"))
@@ -2301,7 +2654,7 @@ class CrashAnalyzer(tk.Tk):
         canvas.bind("<Leave>", _on_leave)
 
     def _open_pattern_editor(self):
-        """Open a simple editor for crash_patterns.json."""
+
         win = tk.Toplevel(self)
         win.title("Crash Pattern Editor")
         win.geometry("900x700")
@@ -2650,7 +3003,7 @@ class CrashAnalyzer(tk.Tk):
         canvas.configure(scrollregion=canvas.bbox("all"))
 
     def _highlight_module(self, module_name):
-        """Highlight module row and show memory inspector at the crash address."""
+
         if not self._parsed:
             return
         mods = self._parsed.get("modules", [])
@@ -2660,7 +3013,7 @@ class CrashAnalyzer(tk.Tk):
         self._show_memory_inspector(module_name)
 
     def _show_memory_inspector(self, module_name: str) -> None:
-        """Add a hex dump panel below the module table showing crash address memory."""
+
         if not self._parsed:
             return
         parsed = self._parsed
@@ -2829,7 +3182,7 @@ class CrashAnalyzer(tk.Tk):
         SYSTEM_PREFIXES = ("c:\\windows\\", "c:\\program files\\windows")
 
         def frame_colour(mod_name):
-            """Colour a stack frame by its origin."""
+
             n = (mod_name or "").lower()
             if "helldivers2.exe" in n or ("game" in n and ".dll" in n):
                 return YELLOW
