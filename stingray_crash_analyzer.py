@@ -308,6 +308,23 @@ def parse_minidump(path: str) -> dict:
                     if poff + 8 <= len(data):
                         params.append(hex(struct.unpack_from("<Q", data, poff)[0]))
                 desc = EXCEPTION_CODES.get(code, f"Unknown exception 0x{code:08X}")
+
+                ex_ctx_regs = {}
+                ex_ctx_loc  = srva + 160
+                if ex_ctx_loc + 8 <= len(data):
+                    ex_ctx_size = struct.unpack_from("<I", data, ex_ctx_loc)[0]
+                    ex_ctx_rva  = struct.unpack_from("<I", data, ex_ctx_loc + 4)[0]
+                    if ex_ctx_rva + 0x100 <= len(data) and ex_ctx_size >= 0x100:
+                        def _r(off): return struct.unpack_from("<Q", data, ex_ctx_rva + off)[0]
+                        ex_ctx_regs = {
+                            "rax": _r(0x78), "rcx": _r(0x80), "rdx": _r(0x88),
+                            "rbx": _r(0x90), "rsp": _r(0x98), "rbp": _r(0xA0),
+                            "rsi": _r(0xA8), "rdi": _r(0xB0), "r8":  _r(0xB8),
+                            "r9":  _r(0xC0), "r10": _r(0xC8), "r11": _r(0xD0),
+                            "r12": _r(0xD8), "r13": _r(0xE0), "r14": _r(0xE8),
+                            "r15": _r(0xF0),
+                        }
+
                 result["exception"] = {
                     "thread_id":   tid,
                     "code":        f"0x{code:08X}",
@@ -316,6 +333,7 @@ def parse_minidump(path: str) -> dict:
                     "address":     f"0x{addr:016X}",
                     "param_count": nparams,
                     "params":      params,
+                    "regs":        ex_ctx_regs,   # ground-truth registers at crash time
                 }
 
         if stype == 4 and srva + 4 <= len(data):
@@ -539,6 +557,34 @@ def annotate_frame(mod_name: str, offset: int) -> str:
     if n in ("hid.dll", "hidclass.dll"):
         return "Windows HID (input device)"
 
+    if "amd_fidelityfx" in n:
+        return "AMD FidelityFX / FSR upscaler"
+    if "libxess" in n:
+        return "Intel XeSS AI upscaler"
+
+    if "nvspcap" in n:
+        return "NVIDIA ShadowPlay / screen capture"
+    if "nvgpucomp" in n:
+        return "NVIDIA GPU compute user-mode driver"
+    if "nvldumd" in n:
+        return "NVIDIA DirectX UMD loader"
+    if "nvppex" in n:
+        return "NVIDIA post-processing extensions"
+    if "nvmemmapsto" in n:
+        return "NVIDIA memory-mapped storage"
+    if "nvmessagebus" in n:
+        return "NVIDIA driver message bus (IPC)"
+
+    if "d3d11on12" in n:
+        return "D3D11-on-D3D12 compatibility layer"
+    if "dxilconv" in n:
+        return "DXIL shader bytecode converter"
+    if "d3dscache" in n or "d3dscache" in n:
+        return "D3D shader cache"
+
+    if "msvcr110" in n or "msvcr120" in n or "msvcr100" in n:
+        return "Legacy MSVC C runtime (2010–2013)"
+
     if "reshade" in n:
         return "ReShade post-processing (D3D hook)"
     if "minhook" in n or "minhook64" in n:
@@ -554,6 +600,77 @@ def annotate_frame(mod_name: str, offset: int) -> str:
         return "Game code DLL"
 
     return ""
+
+
+def label_thread_purpose(stack_mod_names: list) -> tuple[str, str]:
+    """Identify a thread's purpose from its stack frame module names.
+
+    Returns (label, colour_key) where colour_key is one of:
+    'crash', 'game', 'audio', 'gpu', 'dstorage', 'input',
+    'network', 'video', 'system', 'handler'.
+
+    Rules are checked in priority order; first match wins.
+    stack_mod_names: list of Path(module_name).name strings (mixed case OK).
+    """
+    mods = set(n.lower() for n in stack_mod_names if n)
+
+    def has(*keywords):
+        return any(any(kw in m for kw in keywords) for m in mods)
+
+    if has("crs-client", "crashpad", "sentry", "backtrace"):
+        return "Crash reporter", "handler"
+    if has("npggnt", "npsc64"):
+        return "GameGuard (anti-cheat)", "system"
+    if has("easyanticheat"):
+        return "EasyAntiCheat", "system"
+    if has("battleye", "beclient"):
+        return "BattlEye", "system"
+    if has("wwise"):
+        return "Wwise audio", "audio"
+    if has("fmodstudio", "fmod64", "fmodl64"):
+        return "FMOD audio", "audio"
+    if has("xaudio2", "audioses", "x3daudio"):
+        return "XAudio2 audio", "audio"
+    if has("windows.media.devices", "mmdevapi"):
+        return "Audio device manager", "audio"
+    if has("nvwgf2umx", "nvwgf2um", "nvd3dumx", "nvd3dum"):
+        return "GPU render (NVIDIA)", "gpu"
+    if has("amdxc64", "amdxc32", "amdxx64", "amdxx32", "atidxx64", "atidxx32"):
+        return "GPU render (AMD)", "gpu"
+    if has("igd10um", "igdumd64", "igxelpicd64"):
+        return "GPU render (Intel)", "gpu"
+    if has("igc64", "igdgmm64"):
+        return "GPU render (Intel)", "gpu"
+    if has("nvmessagebus", "nvgpucomp"):
+        return "NVIDIA driver worker", "gpu"
+    if has("d3d11on12"):
+        return "D3D11-on-D3D12 worker", "gpu"
+    if has("dstorage"):
+        return "DirectStorage", "dstorage"
+    if has("gameinputredist"):
+        return "GameInput (controller)", "input"
+    if has("xinput"):
+        return "XInput (controller)", "input"
+    if has("inputhost", "coremessaging"):
+        return "Input / UI message pump", "input"
+    if has("playfabmultiplayerwin"):
+        return "PlayFab multiplayer", "network"
+    if has("partywin"):
+        return "Xbox Party SDK", "network"
+    if has("steam_api", "steamclient"):
+        return "Steam", "network"
+    if has("winhttp", "urlmon"):
+        return "HTTP / telemetry", "network"
+    if has("mswsock", "ws2_32", "dnsapi"):
+        return "Socket / network", "network"
+    if has("crypt32", "ncrypt", "bcryptprimitives"):
+        return "Crypto / TLS", "network"
+    if has("bink2w64", "bink2w32"):
+        return "Bink video decoder", "video"
+    if has("helldivers2.exe", "game.dll"):
+        return "Game worker thread", "game"
+
+    return "OS thread pool", "system"
 
 
 def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
@@ -699,21 +816,30 @@ def analyse_threads(parsed: dict) -> list:
         frames = walk_stack(parsed, t.get("rsp", 0), max_frames=16)
         all_frames = [(t.get("rip", 0), short_name or "unknown", offset)] + frames
 
+        # Label thread purpose from all module names visible on the stack
+        all_stack_mods = ([short_name] if short_name else []) + [mod for _, mod, _ in frames]
+        purpose, purpose_colour_key = label_thread_purpose(all_stack_mods)
+        # Crash thread overrides purpose regardless of stack content
+        if is_crashed:
+            purpose = "CRASHED"
+
         result.append({
-            "tid":        tid,
-            "state":      state,
-            "doing":      doing,
-            "module":     short_name or "unknown",
-            "offset":     f"+0x{offset:X}",
-            "rip":        f"0x{rip:016X}",
-            "priority":   pri,
-            "suspend":    suspend,
-            "is_crashed": is_crashed,
-            "is_game":    is_game,
-            "is_handler": is_handler,
-            "is_system":  is_system,
-            "wait_label": wait_label,
-            "frames":     all_frames,
+            "tid":               tid,
+            "state":             state,
+            "doing":             doing,
+            "purpose":           purpose,
+            "purpose_colour_key":purpose_colour_key,
+            "module":            short_name or "unknown",
+            "offset":            f"+0x{offset:X}",
+            "rip":               f"0x{rip:016X}",
+            "priority":          pri,
+            "suspend":           suspend,
+            "is_crashed":        is_crashed,
+            "is_game":           is_game,
+            "is_handler":        is_handler,
+            "is_system":         is_system,
+            "wait_label":        wait_label,
+            "frames":            all_frames,
         })
 
     def sort_key(t):
@@ -744,6 +870,14 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
         "igdumd64.dll":   "Intel GPU driver",
         "igdumdim64.dll": "Intel GPU driver (media)",
         "igxelpicd64.dll":"Intel Arc GPU driver",
+        "igd10um64gen11.dll": "Intel GPU driver (Gen11)",
+        "igd10iumd64.dll":"Intel GPU driver (media UMD)",
+        "igdgmm64.dll":   "Intel GPU memory manager",
+        "igc64.dll":      "Intel GPU shader compiler",
+        "igd12dxva64.dll":"Intel GPU DXVA (video accel)",
+        "nvgpucomp64.dll":"NVIDIA GPU compute UMD",
+        "nvldumdx.dll":   "NVIDIA DX UMD loader",
+        "nvppex.dll":     "NVIDIA post-processing extensions",
     }
     GPU_RUNTIME_DLLS = {
         "d3d12.dll":      "Direct3D 12 runtime",
@@ -967,9 +1101,27 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             fault_addr  = int(params[1], 16)
 
             decoded_instr = None
-            instr_mem = read_virtual_memory(parsed, ex_addr, 10)
+            instr_mem = read_virtual_memory(parsed, ex_addr, 16)  # 16 bytes to catch vtable pattern
             if instr_mem:
                 decoded_instr = decode_crash_instruction(instr_mem, ex_addr)
+
+            is_vtable_dispatch = False
+            vtable_slot = None
+            if instr_mem and len(instr_mem) >= 6:
+                ib = list(instr_mem)
+                if (len(ib) >= 6 and ib[0] in (0x48, 0x49, 0x4C, 0x4D)
+                        and ib[1] == 0x8B
+                        and (ib[2] >> 6) == 0
+                        and ib[3] == 0xFF
+                        and ib[4] in (0x50, 0x90)):
+                    disp = ib[5]
+                    slot = disp // 8
+                    is_vtable_dispatch = True
+                    vtable_slot = slot
+
+            ex_regs = ex.get("regs", {})
+            crash_rcx = ex_regs.get("rcx", None)
+            crash_rax = ex_regs.get("rax", None)
 
             if decoded_instr and decoded_instr["is_suicide"]:
                 findings.append({"conf": "HIGH",
@@ -979,15 +1131,30 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                                "the active game thread for the real trigger."),
                     "link": None,
                 })
+            elif is_vtable_dispatch and fault_addr == 0 and crash_rcx == 0:
+                findings.append({"conf": "HIGH",
+                    "title": f"Virtual method called on null 'this' pointer — vtable dispatch crashed",
+                    "detail": (
+                        f"The crash instruction is MOV RAX, [RCX] followed by CALL [RAX+0x{ib[5]:02X}] "
+                        f"— the standard x64 C++ virtual dispatch sequence. "
+                        f"RCX ('this' pointer) was 0x0 at crash time, so loading the vtable from [RCX] "
+                        f"faulted immediately. Virtual function at vtable slot {vtable_slot} "
+                        f"(offset +0x{ib[5]:02X}) was the intended target. "
+                        f"The object was never initialised, was already destroyed, or a function "
+                        f"returned null and the caller didn't check before calling a method on it."
+                    ),
+                    "link": None,
+                })
             elif fault_addr == 0:
                 findings.append({"conf": "HIGH",
                     "title": f"Null pointer {op} at 0x0",
-                    "detail": (f"The engine attempted to {op} to address 0x0. "
+                    "detail": (f"The engine attempted to {op} address 0x0. "
                                f"In Stingray this typically means an object pointer was never initialized, "
                                f"or an object was destroyed and its pointer was not cleared before use. "
                                + (decoded_instr["explanation"] if decoded_instr else
                                   "A write to null is often a destroyed object still being updated." if op == "write"
-                                  else "A read from null is often a missing resource or uninitialized component.")),
+                                  else "A read from null is often a missing resource or uninitialized component.")
+                               + (f" RCX=0x{crash_rcx:016X}" if crash_rcx is not None else "")),
                     "link": None,
                 })
             elif fault_addr < 0x100:
@@ -1111,6 +1278,18 @@ def build_summary(parsed: dict) -> str:
             lines.append(f"  In      : {crash_mod or '(address outside all known modules)'}")
         except Exception:
             pass
+        regs = ex.get("regs", {})
+        if regs:
+            lines.append("")
+            lines.append("── REGISTERS AT CRASH (ExceptionStream — ground truth) ─")
+            null_regs = {k: v for k, v in regs.items() if v == 0}
+            near_null = {k: v for k, v in regs.items() if 0 < v < 0x1000}
+            for name, val in regs.items():
+                flag = "  ← NULL" if val == 0 else (f"  ← near-null (0x{val:X})" if val < 0x1000 else "")
+                if flag:
+                    lines.append(f"  {name.upper():<5} = 0x{val:016X}{flag}")
+            if not null_regs and not near_null:
+                lines.append("  (no null/near-null registers at crash time)")
     else:
         lines.append("")
         lines.append("── EXCEPTION : none found ──────────────────────────")
@@ -1571,6 +1750,21 @@ def detect_mods(parsed: dict) -> dict:
         "concrt140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
         "vcruntime140_1.dll",
         "playfabmultiplayerwin.dll", "partywin.dll",
+        "amd_fidelityfx_upscaler_dx12.dll",
+        "amd_fidelityfx_upscaler_dx11.dll",
+        "libxess.dll",
+        "nvspcap64.dll", "nvspcap.dll",
+        "nvgpucomp64.dll",
+        "nvldumdx.dll",
+        "nvppex.dll",
+        "nvmemmapmapstoragex.dll",
+        "nvmessagebus.dll",
+        "d3d11on12.dll",
+        "dxilconv.dll",
+        "d3dscache.dll",
+        "dxcore.dll",
+        "msvcr110.dll", "msvcr120.dll", "msvcr100.dll",
+        "xaudio2_7.dll", "xaudio2_8.dll",
     }
 
     MOD_MANAGER_PATHS = {
@@ -1799,7 +1993,10 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
         "amdxc64", "amdxc32", "amdxx64", "amdxx32",
         "atidxx64", "atidxx32", "amdihk64",
         "nvwgf2umx", "nvwgf2um", "nvd3dumx", "nvd3dum",
+        "nvgpucomp64", "nvldumdx", "nvppex",
         "igdumd64", "igdumd32", "igxelpicd64",
+        "igd10um64", "igd10iumd64", "igc64", "igdgmm64",
+        "igd12dxva64",
     )
 
     def mod_for_addr(addr: int) -> "str | None":
@@ -2185,6 +2382,34 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             "confidence": "HIGH",
         })
 
+
+    if (ex_code == 0xC0000005 and len(params) >= 2
+            and params[0] == "0x0"
+            and fault_addr == 0
+            and not is_suicide):
+        return _builtin("NULL_DEREF_READ", {
+            "id":   "NULL_DEREF_READ",
+            "name": "Null pointer read — object was null or already destroyed",
+            "player_message": (
+                "The game tried to read from a null pointer. "
+                "This means an object that was expected to exist was null — "
+                "it was never created, already destroyed, or a function returned null "
+                "and the caller didn't check before using it."
+            ),
+            "fix": [
+                "This is a game bug — please report it with the dump file",
+                "Share both the .dmp and the .log file with the 418th",
+                "Note exactly what you were doing when it crashed",
+                "Check if it happens consistently or randomly",
+            ],
+            "dev_note": (
+                "AV read from 0x0 — the base pointer itself was null (not a field offset). "
+                "Instruction is typically MOV reg, [RCX] or similar. "
+                "Check the active game thread for what passed the null pointer."
+            ),
+            "confidence": "HIGH",
+        })
+
     if (ex_code == 0xC0000005 and len(params) >= 2
             and params[0] == "0x1"
             and fault_addr < 0x10000
@@ -2203,6 +2428,38 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                 "Note exactly what you were doing when it crashed",
             ],
             "dev_note": "AV write to near-null address - use-after-free or uninit pointer write",
+            "confidence": "HIGH",
+        })
+
+    _has_nvidia = any("nvwgf" in m or "nvgpucomp" in m or "nvd3d" in m
+                      for m in all_mods.split())
+    _has_intel_igpu = any("igd10um" in m or "igc64" in m or "igdgmm" in m
+                          for m in all_mods.split())
+    if (_has_nvidia and _has_intel_igpu
+            and ex_code == 0xC0000005
+            and not is_suicide
+            and crash_mod
+            and any(frag in crash_mod_l for frag in GPU_DRIVER_FRAGMENTS)):
+        return _builtin("DUAL_GPU_DRIVER_CRASH", {
+            "id":   "DUAL_GPU_DRIVER_CRASH",
+            "name": "GPU driver crash on dual-GPU system (NVIDIA + Intel iGPU)",
+            "player_message": (
+                "Your system has both an NVIDIA dedicated GPU and an Intel integrated GPU. "
+                "The game crashed inside a GPU driver. On dual-GPU systems this is often "
+                "caused by the game running on the wrong GPU, or a conflict between the two drivers."
+            ),
+            "fix": [
+                "Open NVIDIA Control Panel → Manage 3D Settings → Program Settings "
+                "→ add Helldivers 2 → set preferred GPU to your NVIDIA card",
+                "Update both your NVIDIA and Intel GPU drivers",
+                "In Windows Display Settings, set the NVIDIA card as the primary GPU",
+                "If on a laptop, disable the Intel iGPU in Device Manager and test",
+                "Update your NVIDIA drivers — use DDU for a clean install if issues persist",
+            ],
+            "dev_note": (
+                "Crash in GPU driver DLL on dual-GPU system (NVIDIA + Intel iGPU both loaded). "
+                "Check which adapter D3D12 is selecting at runtime — possible iGPU fallback."
+            ),
             "confidence": "HIGH",
         })
 
@@ -2347,6 +2604,9 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         "crs-client":   "Arrowhead crash reporter",
         "reshade":      "ReShade post-processing",
         "minhook":      "MinHook (mod injection)",
+        "amd_fidelityfx": "AMD FidelityFX / FSR upscaler",
+        "libxess":      "Intel XeSS upscaler",
+        "nvspcap":      "NVIDIA ShadowPlay capture",
     }
 
     active_subsystems = []
@@ -2504,6 +2764,8 @@ class CrashAnalyzer(tk.Tk):
         if not path:
             return
         self._file_var.set(path)
+        # FIX BUG-6: Disable the open button while parsing to prevent races
+        # if the user clicks again before the background thread finishes.
         self._open_btn.config(state="disabled")
         self._status("Parsing minidump …", busy=True)
 
@@ -2779,15 +3041,15 @@ class CrashAnalyzer(tk.Tk):
                      wraplength=wrap, justify="left", anchor="w").pack(anchor="w", pady=1)
 
         pattern = plain.get("pattern")
-        section("Crash identification", GREEN)
+        section("Crash identification", ACCENT)
         if pattern:
-            conf_colour = {"HIGH": GREEN, "MED": ACCENT2, "LOW": TEXT_DIM}.get(
+            conf_colour = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}.get(
                 pattern.get("confidence", "LOW"), TEXT_DIM)
-            pc = card(inner, "#0d1f0d" if pattern.get("confidence") == "HIGH" else BG3)
+            pc = card(inner, "#1f0d0d" if pattern.get("confidence") == "HIGH" else BG3)
             badge_f = tk.Frame(pc, bg=pc["bg"])
             badge_f.pack(fill="x", pady=(0, 6))
-            tk.Label(badge_f, text="  ✓ KNOWN CRASH PATTERN  ",
-                     bg=conf_colour, fg="black",
+            tk.Label(badge_f, text="  ⚠ KNOWN CRASH PATTERN  ",
+                     bg=conf_colour, fg="white",
                      font=("Consolas", 8, "bold"), padx=6, pady=2).pack(side="left")
             tk.Label(badge_f, text=f"  [{pattern.get('confidence', '?')} CONFIDENCE]",
                      bg=pc["bg"], fg=conf_colour,
@@ -3229,11 +3491,32 @@ class CrashAnalyzer(tk.Tk):
             hline = tk.Frame(body, bg=card_bg)
             hline.pack(fill="x")
             state_lbl = f"◀ {t['state']}" if is_highlighted else t["state"]
+
+            PURPOSE_COLOURS = {
+                "crash":    RED,
+                "game":     YELLOW,
+                "audio":    GREEN,
+                "gpu":      PURPLE,
+                "dstorage": ACCENT,
+                "input":    ACCENT2,
+                "network":  "#58a6ff",
+                "video":    ACCENT2,
+                "system":   TEXT_DIM,
+                "handler":  TEXT_DIM,
+            }
+            purpose        = t.get("purpose", "")
+            purpose_colour = PURPOSE_COLOURS.get(t.get("purpose_colour_key", "system"), TEXT_DIM)
+            if t["is_crashed"]:
+                purpose_colour = RED
+
             tk.Label(hline, text=f"TID {t['tid']:6d}", bg=card_bg, fg=colour,
                      font=(MONO, 9, "bold"), width=12, anchor="w").pack(side="left")
             tk.Label(hline, text=f"[{state_lbl}]", bg=card_bg, fg=colour,
                      font=(MONO, 8, "bold"), width=22, anchor="w").pack(side="left")
-            tk.Label(hline, text=t["doing"], bg=card_bg, fg=TEXT_DIM,
+            if purpose:
+                tk.Label(hline, text=f"  ●  {purpose}", bg=card_bg, fg=purpose_colour,
+                         font=(MONO, 8, "bold")).pack(side="left")
+            tk.Label(hline, text=f"   {t['doing']}", bg=card_bg, fg=TEXT_DIM,
                      font=(MONO, 8)).pack(side="left")
 
             frames = t.get("frames", [])
