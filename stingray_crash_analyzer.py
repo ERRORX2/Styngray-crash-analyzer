@@ -282,9 +282,9 @@ def parse_minidump(path: str) -> dict:
             rev    = struct.unpack_from("<H", data, srva + 4)[0]
             ncpus  = struct.unpack_from("<B", data, srva + 6)[0]
             ptype  = struct.unpack_from("<H", data, srva + 8)[0]
-            osmaj  = struct.unpack_from("<I", data, srva + 16)[0]
-            osmin  = struct.unpack_from("<I", data, srva + 20)[0]
-            osbld  = struct.unpack_from("<I", data, srva + 24)[0]
+            osmaj  = struct.unpack_from("<I", data, srva + 8)[0]
+            osmin  = struct.unpack_from("<I", data, srva + 12)[0]
+            osbld  = struct.unpack_from("<I", data, srva + 16)[0]
             ARCH   = {0: "x86", 5: "ARM", 6: "IA64", 9: "x64", 12: "ARM64"}
             result["system_info"] = {
                 "arch":       ARCH.get(arch, f"arch_{arch}"),
@@ -333,7 +333,7 @@ def parse_minidump(path: str) -> dict:
                     "address":     f"0x{addr:016X}",
                     "param_count": nparams,
                     "params":      params,
-                    "regs":        ex_ctx_regs,   # ground-truth registers at crash time
+                    "regs":        ex_ctx_regs,
                 }
 
         if stype == 4 and srva + 4 <= len(data):
@@ -471,6 +471,8 @@ def annotate_frame(mod_name: str, offset: int) -> str:
         return "AMD GPU driver - DX12 shader compiler"
     if "amdihk" in n:
         return "AMD GPU driver - hook/intercept layer"
+    if "amdcc" in n:
+        return "AMD GPU driver - Chill/Crossfire/Compute"
     if "nvwgf" in n or "nvd3dum" in n:
         return "NVIDIA GPU driver - DirectX user-mode"
     if "igdumd" in n or "igxelp" in n:
@@ -635,7 +637,7 @@ def label_thread_purpose(stack_mod_names: list) -> tuple[str, str]:
         return "Audio device manager", "audio"
     if has("nvwgf2umx", "nvwgf2um", "nvd3dumx", "nvd3dum"):
         return "GPU render (NVIDIA)", "gpu"
-    if has("amdxc64", "amdxc32", "amdxx64", "amdxx32", "atidxx64", "atidxx32"):
+    if has("amdxc64", "amdxc32", "amdxx64", "amdxx32", "atidxx64", "atidxx32", "amdcc64", "amdcc"):
         return "GPU render (AMD)", "gpu"
     if has("igd10um", "igdumd64", "igxelpicd64"):
         return "GPU render (Intel)", "gpu"
@@ -783,10 +785,14 @@ def analyse_threads(parsed: dict) -> list:
                 wait_label, wait_detail = NTDLL_WAITS[ntdll_off]
 
         is_crashed  = tid == crash_tid
+        real_suspend = suspend if 0 < suspend <= 16 else 0
+
         if is_crashed:
             state = "CRASHED"
-        elif suspend > 0:
-            state = f"SUSPENDED (count={suspend})"
+        elif is_handler:
+            state = "CRASH HANDLER"
+        elif real_suspend > 0:
+            state = f"SUSPENDED (count={real_suspend})"
         elif wait_label == "NtDelayExecution" or wait_label and "sleeping" in wait_label.lower():
             state = "SLEEPING"
         elif wait_label and "idle" in wait_detail.lower() if wait_detail else False:
@@ -795,13 +801,18 @@ def analyse_threads(parsed: dict) -> list:
             state = "WAITING"
         elif is_game:
             state = "ACTIVE"
-        elif is_handler:
-            state = "CRASH HANDLER"
         else:
             state = "WAITING"
 
         if is_crashed:
-            doing = "Raised the crash exception - engine suicide, not the root cause"
+            _ex     = parsed.get("exception", {}) or {}
+            _code   = int(_ex.get("code", "0"), 16) if _ex else 0
+            _params = _ex.get("params", [])
+            _suicide = (_code == 0xC0000005 and len(_params) >= 2
+                        and _params[0] == "0x1" and _params[1] == "0x0")
+            doing = ("Raised the crash exception — engine suicide (intentional write to null)"
+                     if _suicide else
+                     "Raised the crash exception — see Root Cause tab for details")
         elif is_handler:
             doing = f"{CRASH_HANDLER_DLLS[short_lower]} - byproduct of crash"
         elif wait_detail:
@@ -816,12 +827,12 @@ def analyse_threads(parsed: dict) -> list:
         frames = walk_stack(parsed, t.get("rsp", 0), max_frames=16)
         all_frames = [(t.get("rip", 0), short_name or "unknown", offset)] + frames
 
-        # Label thread purpose from all module names visible on the stack
+
         all_stack_mods = ([short_name] if short_name else []) + [mod for _, mod, _ in frames]
         purpose, purpose_colour_key = label_thread_purpose(all_stack_mods)
-        # Crash thread overrides purpose regardless of stack content
+
         if is_crashed:
-            purpose = "CRASHED"
+            purpose = ""
 
         result.append({
             "tid":               tid,
@@ -851,6 +862,7 @@ def analyse_threads(parsed: dict) -> list:
     result.sort(key=sort_key)
     return result
 
+
 def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
 
     hints = []
@@ -858,6 +870,7 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
     all_names = " ".join(Path(m["name"]).name.lower() for m in modules)
 
     has_dstorage = "dstorage" in all_names
+
 
     GPU_DRIVER_DLLS = {
         "amdxc64.dll":    "AMD GPU driver (DX12 shader compiler)",
@@ -878,6 +891,8 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
         "nvgpucomp64.dll":"NVIDIA GPU compute UMD",
         "nvldumdx.dll":   "NVIDIA DX UMD loader",
         "nvppex.dll":     "NVIDIA post-processing extensions",
+        "amdcc64.dll":    "AMD GPU driver (Chill/Crossfire/Compute)",
+        "amdcc.dll":      "AMD GPU driver (Chill/Crossfire/Compute)",
     }
     GPU_RUNTIME_DLLS = {
         "d3d12.dll":      "Direct3D 12 runtime",
@@ -1052,6 +1067,168 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
 
     return hints
 
+def _null_registers_at_crash(parsed: dict) -> dict:
+    """Return null / near-null GPRs from ExceptionStream ground-truth context.
+    These are the register values at the EXACT moment of the fault, before
+    any exception handler ran.  Returns {"null":{REG:val}, "near_null":{REG:val}}.
+    """
+    ex   = parsed.get("exception", {}) or {}
+    regs = ex.get("regs", {})
+    if not regs:
+        return {"null": {}, "near_null": {}}
+    return {
+        "null":     {k.upper(): v for k, v in regs.items() if v == 0},
+        "near_null":{k.upper(): v for k, v in regs.items() if 0 < v < 0x10000},
+    }
+
+
+def _identify_bad_register(decoded_instr: dict, null_regs: dict, fault_addr: int) -> "str | None":
+    """Cross-reference the decoded instruction's memory operand with null GPRs
+    to pinpoint which register held the bad/null pointer.
+    Returns the register name (e.g. 'R10') or None if ambiguous.
+    """
+    if not decoded_instr or not null_regs:
+        return None
+    instr = decoded_instr.get("instruction", "")
+    mem_m = re.search(r'\[([^\]]+)\]', instr)
+    if not mem_m:
+        return None
+    operand = mem_m.group(1)
+    base_m = re.match(r'(R(?:[A-Z]{2}|[0-9]+)|E[A-Z]{2})', operand)
+    if base_m:
+        base = base_m.group(1)
+        if base in null_regs:
+            return base
+    for reg in sorted(null_regs, key=len, reverse=True):
+        if re.search(r'\b' + reg + r'\b', operand):
+            return reg
+    return None
+
+
+def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
+    """Reconstruct the crash thread's call chain using ExceptionStream RSP
+    (the stack pointer at the exact moment of the fault, before exception
+    handlers modified it) and filter aggressively to game/engine frames only.
+
+    Returns a list of (addr, module_short_name, offset) tuples, crash RIP first.
+    """
+    ex        = parsed.get("exception", {}) or {}
+    ex_regs   = ex.get("regs", {})
+    crash_rip = int(ex.get("address", "0"), 16) if ex else 0
+    crash_rsp = ex_regs.get("rsp", 0)
+    modules   = parsed.get("modules", [])
+    raw_path  = parsed.get("_raw_path")
+
+    if not crash_rsp or not raw_path:
+        return []
+
+    SKIP_NAMES = {
+        "gameoverlayrenderer64.dll", "gameoverlayrenderer.dll",
+        "npggnt64.des", "npsc64.des",
+        "crs-client.dll", "crashpad_handler.exe", "sentry.dll", "backtrace.dll",
+        "easyanticheat.dll", "easyanticheat_launcher.dll",
+    }
+    SKIP_PATH_FRAGMENTS = ("\\windows\\", "\\gameguard\\", "gameoverlayrenderer")
+
+    def is_engine_frame(mod_name: str, full_path: str) -> bool:
+        if not mod_name:
+            return False
+        nl = mod_name.lower()
+        fl = full_path.lower().replace("/", "\\")
+        if nl in SKIP_NAMES or nl.endswith(".des"):
+            return False
+        return not any(frag in fl for frag in SKIP_PATH_FRAGMENTS)
+
+    def addr_to_mod(addr: int):
+        for m in modules:
+            try:
+                base = int(m["base"], 16)
+                if base <= addr < base + m["size"]:
+                    return Path(m["name"]).name, addr - base, m["name"]
+            except Exception:
+                pass
+        return None, 0, ""
+
+    try:
+        with open(raw_path, "rb") as f:
+            raw = f.read()
+    except Exception:
+        return []
+
+    def read_u64(addr: int):
+        for (start, msz, rva) in parsed.get("memory_map", []):
+            if start <= addr < start + msz:
+                off = addr - start
+                if rva + off + 8 <= len(raw):
+                    return struct.unpack_from("<Q", raw, rva + off)[0]
+        return None
+
+    chain = []
+
+    mod, off, full = addr_to_mod(crash_rip)
+    if is_engine_frame(mod, full):
+        chain.append((crash_rip, mod, off))
+
+    ptr     = crash_rsp
+    scanned = 0
+    prev    = None
+    while len(chain) < max_frames and scanned < 0xC000:
+        val = read_u64(ptr)
+        if val is None:
+            break
+        mod, off, full = addr_to_mod(val)
+        if mod and off > 0 and is_engine_frame(mod, full) and (val, mod, off) != prev:
+            chain.append((val, mod, off))
+            prev = (val, mod, off)
+        ptr     += 8
+        scanned += 8
+
+    return chain
+
+
+def _active_game_threads_at_crash(parsed: dict) -> list:
+    """Return active non-crash non-system game threads at crash time.
+    Each entry: {tid, module, offset, rcx, purpose}.
+    Primarily used to identify what triggered an engine suicide.
+    """
+    ex        = parsed.get("exception", {}) or {}
+    crash_tid = ex.get("thread_id")
+    modules   = parsed.get("modules", [])
+    SKIP_HANDLERS = {"crs-client.dll", "crashpad_handler.exe", "crashrpt.dll",
+                     "sentry.dll", "backtrace.dll"}
+    SYSTEM_PREFIXES = ("c:\\windows\\", "c:\\program files\\windows")
+
+    def addr_to_mod(addr):
+        for m in modules:
+            try:
+                base = int(m["base"], 16)
+                if base <= addr < base + m["size"]:
+                    full = m["name"].lower().replace("/", "\\")
+                    return Path(m["name"]).name, addr - base, full
+            except Exception:
+                pass
+        return None, 0, ""
+
+    result = []
+    for t in parsed.get("threads", []):
+        if t.get("tid") == crash_tid:
+            continue
+        rip = t.get("rip", 0)
+        mod, off, full = addr_to_mod(rip)
+        if not mod:
+            continue
+        if mod.lower() in SKIP_HANDLERS:
+            continue
+        if any(full.startswith(p) for p in SYSTEM_PREFIXES):
+            continue
+        result.append({
+            "tid":    t["tid"],
+            "module": mod,
+            "offset": off,
+            "rcx":    t.get("rcx", 0),
+        })
+    return result
+
 def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
 
     findings = []
@@ -1096,12 +1273,20 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         params  = ex.get("params", [])
         ex_addr = int(ex.get("address", "0"), 16)
 
+        _pre_decoded = None
+        try:
+            _imem = read_virtual_memory(parsed, ex_addr, 16)
+            if _imem:
+                _pre_decoded = decode_crash_instruction(_imem, ex_addr)
+        except Exception:
+            pass
+
         if ex_code == 0xC0000005 and len(params) >= 2:
             op          = "write" if params[0] == "0x1" else "read"
             fault_addr  = int(params[1], 16)
 
             decoded_instr = None
-            instr_mem = read_virtual_memory(parsed, ex_addr, 16)  # 16 bytes to catch vtable pattern
+            instr_mem = read_virtual_memory(parsed, ex_addr, 16)
             if instr_mem:
                 decoded_instr = decode_crash_instruction(instr_mem, ex_addr)
 
@@ -1196,21 +1381,112 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         pass
 
     for t, mod, off, full in active_game_threads:
-
-        rcx = t.get("rcx", 0)
-        rax = t.get("rax", 0)
-        rdx = t.get("rdx", 0)
+        rcx       = t.get("rcx", 0)
+        rax       = t.get("rax", 0)
+        rdx       = t.get("rdx", 0)
         this_null = rcx < 0x1000
         findings.append({"conf": "MED" if not this_null else "HIGH",
             "title": f"Active game thread in {mod} +0x{off:X}",
-            "detail": (f"This thread was executing game code when the crash occurred - "
+            "detail": (f"This thread was executing game code when the crash occurred — "
                        f"it is the most likely location of the root cause. "
-                       + (f"RCX (likely 'this' pointer) = 0x{rcx:016X} - near zero, suggesting a null object was being called on. "
+                       + (f"RCX (likely 'this' pointer) = 0x{rcx:016X} — near zero, "
+                          f"suggesting a virtual call on a null/destroyed object. "
                           if this_null else
                           f"RCX=0x{rcx:016X}  RDX=0x{rdx:016X}  RAX=0x{rax:016X}. ")
                        + f"Click to inspect in Threads tab."),
             "link": {"tab": "threads", "tid": t["tid"]},
         })
+
+    null_info = _null_registers_at_crash(parsed)
+    null_regs  = null_info["null"]
+    near_nulls = null_info["near_null"]
+
+    if null_regs:
+        bad_reg = _identify_bad_register(_pre_decoded, null_regs, fault_addr) if _pre_decoded else None
+        if len(null_regs) == 1:
+            reg, val = next(iter(null_regs.items()))
+            confirmed_str = (" This matches the base register in the crash instruction — "
+                            f"confirmed: {bad_reg} was the null pointer." if bad_reg and bad_reg == reg else "")
+            findings.append({"conf": "HIGH",
+                "title": f"Register {reg} was null at crash time (ExceptionStream confirmed)",
+                "detail": (f"{reg} = 0x{val:016X} — captured at the exact CPU state of the fault "
+                           f"before any exception handler ran.{confirmed_str} "
+                           f"{reg} held a null pointer that was dereferenced or called."),
+                "link": None,
+            })
+        elif len(null_regs) <= 4:
+            reg_list = ", ".join(null_regs.keys())
+            bad_str  = f" Instruction analysis points to {bad_reg} as the base pointer." if bad_reg else ""
+            findings.append({"conf": "MED",
+                "title": f"Multiple null registers at crash: {reg_list}",
+                "detail": (f"Registers {reg_list} were all zero at crash time (ExceptionStream).{bad_str} "
+                           f"Multiple nulls can indicate an uninitialised struct, "
+                           f"a use-after-free where the freed block was zeroed, "
+                           f"or a C++ object whose constructor never ran."),
+                "link": None,
+            })
+        else:
+            reg_list = ", ".join(list(null_regs.keys())[:6]) + (f" +{len(null_regs)-6} more" if len(null_regs) > 6 else "")
+            findings.append({"conf": "MED",
+                "title": f"{len(null_regs)} GPRs were null at crash — likely uninitialized or zeroed memory",
+                "detail": (f"Null registers: {reg_list}. "
+                           f"Having this many zero registers at fault time suggests the code was "
+                           f"executing in a freshly-zeroed or corrupted stack/heap frame. "
+                           f"Could indicate a use-after-free, stack smash, or calling a method "
+                           f"on a default-constructed (zero-initialised) object."),
+                "link": None,
+            })
+
+    if near_nulls:
+        nr_list = ", ".join(f"{r}=0x{v:X}" for r, v in near_nulls.items())
+        findings.append({"conf": "LOW",
+            "title": f"Near-null registers: {nr_list}",
+            "detail": ("These registers held small non-zero values — "
+                       "they may be array indices, loop counters, or enum values "
+                       "rather than null pointers. Low signal on their own."),
+            "link": None,
+        })
+
+    chain = _reconstruct_call_chain(parsed, max_frames=12)
+    if chain:
+        chain_lines = []
+        for i, (addr, mod, off) in enumerate(chain):
+            prefix = "CRASH → " if i == 0 else f"  ← #{i:02d}  "
+            chain_lines.append(f"{prefix}0x{addr:016X}  {mod} +0x{off:X}")
+        findings.append({"conf": "MED",
+            "title": f"Crash thread call chain ({len(chain)} engine frames, heuristic)",
+            "detail": ("Heuristic stack walk from crash-time RSP (ExceptionStream), "
+                       "filtered to engine/game modules only. "
+                       "Without PDB symbols these are raw addresses — use WinDbg with PDBs "
+                       "to resolve function names. Frames may include false positives. "
+                       + "\n".join(chain_lines)),
+            "link": None,
+        })
+
+    is_suicide_crash = (
+        ex_code == 0xC0000005
+        and len(params) >= 2
+        and params[0] == "0x1"
+        and params[1] == "0x0"
+    )
+    if is_suicide_crash:
+        active_game = _active_game_threads_at_crash(parsed)
+        if active_game:
+            trigger_lines = []
+            for t in active_game[:8]:
+                trigger_lines.append(
+                    "  TID {:6d}  {}+0x{:X}{}".format(
+                        t["tid"], t["module"], t["offset"],
+                        "  <- RCX null (null object)" if t["rcx"] < 0x1000 else "")
+                )
+            findings.append({"conf": "MED",
+                "title": f"Engine suicide — {len(active_game)} game thread(s) active at trigger time",
+                "detail": ("These threads were executing game code when the suicide instruction fired. "
+                           "One of them most likely caused the engine to detect an internal error "
+                           "and call its crash routine. Check the .log for which assertion/check failed. "
+                           + "\n".join(trigger_lines)),
+                "link": None,
+            })
 
     if not findings:
         findings.append({"conf": "LOW",
@@ -1782,11 +2058,27 @@ def detect_mods(parsed: dict) -> dict:
         "\\patch\\":         "Patch folder (common mod override location)",
         "\\content\\":       "Content override folder",
         "\\custom\\":        "Custom content folder",
-        "nexusmods":        "Nexus Mods",
         "modengine2":       "ModEngine2 (Souls modding framework)",
         "reshade":          "ReShade (post-processing / D3D hook)",
         "minhook":          "MinHook (function hooking - common mod injection vector)",
         "\\xinput\\":        "XInput hook (common mod injection point)",
+    }
+
+    PROXY_SYSTEM_DLLS: dict[str, str] = {
+        "dxgi.dll":       "DXGI proxy — likely ReShade or another D3D post-process hook",
+        "d3d12.dll":      "D3D12 proxy — likely ReShade or a D3D12 hook",
+        "d3d11.dll":      "D3D11 proxy — likely ReShade or a D3D11 hook",
+        "d3d10.dll":      "D3D10 proxy — likely ReShade or a D3D10 hook",
+        "d3d9.dll":       "D3D9 proxy — likely ReShade, ENB, or a D3D9 hook",
+        "opengl32.dll":   "OpenGL proxy — likely an OpenGL hook or injector",
+        "dinput8.dll":    "DInput8 proxy — classic mod injection vector",
+        "dinput.dll":     "DInput proxy — classic mod injection vector",
+        "winmm.dll":      "WinMM proxy — common mod injection vector (used by many mod loaders)",
+        "version.dll":    "Version proxy — common lightweight mod injection vector",
+        "wsock32.dll":    "WinSock proxy — network hook (uncommon in games, suspicious)",
+        "xinput1_3.dll":  "XInput 1.3 proxy — controller hook or mod injection vector",
+        "xinput1_4.dll":  "XInput 1.4 proxy — controller hook or mod injection vector",
+        "dsound.dll":     "DirectSound proxy — audio hook or legacy mod injection",
     }
 
     for m in modules:
@@ -1805,6 +2097,17 @@ def detect_mods(parsed: dict) -> dict:
                 "path":   name,
                 "detail": f"DLL loaded from unexpected location: {name}",
             })
+
+        _proxy_name = name.replace("\\", "/").split("/")[-1].lower()
+        if _proxy_name in PROXY_SYSTEM_DLLS:
+            is_in_system32 = ("\\windows\\" in nl or "\\system32\\" in nl
+                               or "\\syswow64\\" in nl or "\\winsxs\\" in nl)
+            if not is_in_system32:
+                indicators.append({
+                    "type":   "proxy_dll",
+                    "path":   name,
+                    "detail": f"Proxy DLL in game folder: {_proxy_name} — {PROXY_SYSTEM_DLLS[_proxy_name]}",
+                })
 
         for sig, label in MOD_MANAGER_PATHS.items():
             if sig in nl:
@@ -1839,8 +2142,9 @@ def detect_mods(parsed: dict) -> dict:
             unique.append(ind)
 
     has_mods   = len(unique) > 0
-    confidence = "HIGH" if any(i["type"] in ("workshop_mod", "mod_manager") for i in unique) else \
-                 "MED"  if any(i["type"] == "unknown_dll" for i in unique) else "LOW"
+    confidence = ("HIGH" if any(i["type"] in ("workshop_mod", "mod_manager", "proxy_dll")
+                                for i in unique) else
+                  "MED"  if any(i["type"] == "unknown_dll" for i in unique) else "LOW")
 
     return {
         "has_mods":   has_mods,
@@ -1994,6 +2298,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
         "atidxx64", "atidxx32", "amdihk64",
         "nvwgf2umx", "nvwgf2um", "nvd3dumx", "nvd3dum",
         "nvgpucomp64", "nvldumdx", "nvppex",
+        "amdcc64", "amdcc",
         "igdumd64", "igdumd32", "igxelpicd64",
         "igd10um64", "igd10iumd64", "igc64", "igdgmm64",
         "igd12dxva64",
@@ -2253,6 +2558,127 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                 "If you have mods, try without them first",
             ],
             "dev_note": "Heap corruption - use heap debug allocator to find the stomper",
+            "confidence": "HIGH",
+        })
+
+    _PROXY_NAMES_SET = {"dxgi.dll","d3d12.dll","d3d11.dll","d3d10.dll","d3d9.dll",
+                        "opengl32.dll","dinput8.dll","winmm.dll","version.dll","dsound.dll"}
+    _SYS_PATH_FRAGS  = ("\\windows\\", "\\system32\\", "\\syswow64\\", "\\winsxs\\")
+
+    def _mod_basename(path):
+        return path.replace("\\", "/").split("/")[-1].lower()
+
+    def _is_proxy(mod_dict):
+        """True if this module is a system-named DLL loaded from outside Windows."""
+        n  = _mod_basename(mod_dict["name"])
+        fl = mod_dict["name"].lower().replace("/", "\\")
+        return n in _PROXY_NAMES_SET and not any(f in fl for f in _SYS_PATH_FRAGS)
+
+    _crash_in_proxy_mod = None
+    for m in modules:
+        try:
+            b = int(m["base"], 16)
+            if b <= ex_addr < b + m["size"] and _is_proxy(m):
+                _crash_in_proxy_mod = m
+                break
+        except Exception:
+            pass
+
+    if _crash_in_proxy_mod:
+        _pname = _mod_basename(_crash_in_proxy_mod["name"])
+        return _builtin("RESHADE_DIRECT_CRASH", {
+            "id":   "RESHADE_DIRECT_CRASH",
+            "name": f"Crash inside proxy DLL: {_pname} (ReShade / D3D hook)",
+            "player_message": (
+                f"The crash happened inside {_pname} which is in your game folder "
+                f"instead of Windows\\System32. This is a ReShade, ENB, or other D3D hook. "
+                f"The hook itself crashed — this is not a game bug."
+            ),
+            "fix": [
+                f"Remove {_pname} from the game folder and test without it",
+                "If using ReShade: update to the latest version for this game",
+                "Try disabling ReShade shaders one by one to find the culprit",
+                "Verify game files through Steam after removing the proxy DLL",
+            ],
+            "dev_note": (
+                f"Crash addr inside {_pname} loaded from game folder (proxy/hook DLL). "
+                f"Not engine code — report to ReShade/ENB developers."
+            ),
+            "confidence": "HIGH",
+        })
+
+    _D3D_RUNTIME_NAMES = {"d3d12.dll","d3d11.dll","dxgi.dll","d3d12core.dll","dxcore.dll"}
+    _proxy_indicators   = [i for i in mods.get("indicators", []) if i.get("type") == "proxy_dll"]
+    if _proxy_indicators:
+        _crash_in_real_d3d = False
+        for m in modules:
+            try:
+                b = int(m["base"], 16)
+                if b <= ex_addr < b + m["size"]:
+                    n  = _mod_basename(m["name"])
+                    fl = m["name"].lower().replace("/", "\\")
+                    if n in _D3D_RUNTIME_NAMES and any(f in fl for f in _SYS_PATH_FRAGS):
+                        _crash_in_real_d3d = True
+                    break
+            except Exception:
+                pass
+        if _crash_in_real_d3d:
+            _proxy_str = ", ".join(
+                _mod_basename(i["path"]) for i in _proxy_indicators[:3]
+            )
+            return _builtin("RESHADE_D3D_CORRUPTION", {
+                "id":   "RESHADE_D3D_CORRUPTION",
+                "name": f"D3D runtime crash with proxy DLL present ({_proxy_str})",
+                "player_message": (
+                    f"The crash happened inside the DirectX runtime while {_proxy_str} "
+                    f"was loaded from your game folder. "
+                    f"A D3D hook (likely ReShade) probably corrupted the graphics state, "
+                    f"causing the D3D runtime itself to crash."
+                ),
+                "fix": [
+                    f"Remove {_proxy_str} from the game folder and test without it",
+                    "If the crash disappears without the proxy DLL, it is the cause",
+                    "Update ReShade to the latest version if you need it",
+                    "Verify game files through Steam after removing proxy DLLs",
+                ],
+                "dev_note": (
+                    f"Crash in System32 D3D with proxy DLL ({_proxy_str}) present. "
+                    f"Proxy likely corrupted D3D state. Not a vanilla crash."
+                ),
+                "confidence": "MED",
+            })
+
+    proxy_dlls = [i for i in mods.get("indicators", []) if i.get("type") == "proxy_dll"]
+    reshade_mods = [i for i in mods.get("indicators", [])
+                    if i.get("type") in ("mod_manager", "unknown_dll")
+                    and any(k in i.get("detail","").lower()
+                            for k in ("reshade","minhook","enb","dinput"))]
+    all_proxy_hits = proxy_dlls + reshade_mods
+    if all_proxy_hits:
+        proxy_names = ", ".join(
+            i["path"].replace("\\","/").split("/")[-1] for i in all_proxy_hits[:3]
+        )
+        return _builtin("PROXY_DLL_CRASH", {
+            "id":   "PROXY_DLL_CRASH",
+            "name": f"Crash with D3D/input proxy DLL detected ({proxy_names})",
+            "player_message": (
+                f"A proxy DLL was found in your game folder: {proxy_names}. "
+                "This is almost certainly ReShade, ENB, or another post-processing/mod tool "
+                "that replaces a system DLL to hook into the game's rendering or input. "
+                "Proxy DLLs intercept D3D calls and can cause crashes, especially after "
+                "game or driver updates."
+            ),
+            "fix": [
+                f"Remove {proxy_names} from the game's folder and test without it",
+                "If using ReShade: check for a ReShade update compatible with this game version",
+                "If you need ReShade, try reinstalling it after verifying game files",
+                "Verify game files through Steam after removing any proxy DLLs",
+            ],
+            "dev_note": (
+                f"Proxy DLL(s) in game folder: {proxy_names}. "
+                "These replace system DLLs and hook D3D/input — high confidence this "
+                "contributed to the crash. Not a vanilla crash."
+            ),
             "confidence": "HIGH",
         })
 
@@ -3207,7 +3633,7 @@ class CrashAnalyzer(tk.Tk):
                 line = line.strip()
                 if not line:
                     continue
-                if not line.endswith("."):
+                if not line.endswith(".") and "\n" not in line:
                     line += "."
                 fg = ACCENT2 if any(line.startswith(w) for w in ("Load", "Check", "Click", "→")) else TEXT
                 tk.Label(body, text=line, bg=card_bg, fg=fg,
