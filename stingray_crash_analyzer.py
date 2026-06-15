@@ -430,6 +430,605 @@ def parse_minidump(path: str) -> dict:
 
     return result
 
+MSVCP140_KNOWN_GOOD: list[dict] = [
+    {"version": "14.38.x (VS2022 17.8)",  "timestamp": 0x6543C0D5, "size_min": 570_000, "size_max": 620_000,
+     "notes": "VS2022 17.8 redistributable — standard shipping version"},
+    {"version": "14.40.x (VS2022 17.10)", "timestamp": 0x6656D2F0, "size_min": 570_000, "size_max": 625_000,
+     "notes": "VS2022 17.10 redistributable"},
+    {"version": "14.36.x (VS2022 17.6)",  "timestamp": 0x6458F060, "size_min": 565_000, "size_max": 615_000,
+     "notes": "VS2022 17.6 redistributable"},
+    {"version": "14.34.x (VS2022 17.4)",  "timestamp": 0x638EDE40, "size_min": 560_000, "size_max": 610_000,
+     "notes": "VS2022 17.4 redistributable"},
+    {"version": "14.32.x (VS2022 17.2)",  "timestamp": 0x6281F2F0, "size_min": 555_000, "size_max": 608_000,
+     "notes": "VS2022 17.2 redistributable"},
+    {"version": "14.30.x (VS2022 17.0)",  "timestamp": 0x618B7E60, "size_min": 550_000, "size_max": 605_000,
+     "notes": "VS2022 17.0 initial release redistributable"},
+    {"version": "14.29.x (VS2019 16.11)", "timestamp": 0x60E23DC0, "size_min": 540_000, "size_max": 595_000,
+     "notes": "VS2019 16.11 redistributable"},
+    {"version": "14.28.x (VS2019 16.8)",  "timestamp": 0x5F87F400, "size_min": 535_000, "size_max": 590_000,
+     "notes": "VS2019 16.8 redistributable"},
+    {"version": "14.26.x (VS2019 16.6)",  "timestamp": 0x5EC61A60, "size_min": 530_000, "size_max": 585_000,
+     "notes": "VS2019 16.6 redistributable"},
+    {"version": "14.16.x (VS2017 15.9)",  "timestamp": 0x5C5C9CE0, "size_min": 490_000, "size_max": 550_000,
+     "notes": "VS2017 15.9 final redistributable"},
+    {"version": "14.0.x (VS2015 RTM)",    "timestamp": 0x55C1C4C0, "size_min": 420_000, "size_max": 490_000,
+     "notes": "VS2015 RTM redistributable (oldest supported)"},
+    {"version": "14.x x86 (VS2017-2022)", "timestamp": 0,          "size_min": 380_000, "size_max": 530_000,
+     "notes": "x86 32-bit build — loaded from SysWOW64 by 32-bit processes"},
+    {"version": "14.0.x x86 (VS2015)",    "timestamp": 0,          "size_min": 300_000, "size_max": 430_000,
+     "notes": "x86 32-bit VS2015 build from SysWOW64"},
+]
+
+DISCORD_KNOWN_GOOD: list[dict] = [
+    {"dll": "discord_game_sdk.dll", "version": "3.2.1", "size_min": 2_500_000, "size_max": 3_200_000,
+     "notes": "Discord Game SDK v3.2.1 — current official release"},
+    {"dll": "discord_game_sdk.dll", "version": "3.1.x", "size_min": 2_400_000, "size_max": 3_100_000,
+     "notes": "Discord Game SDK v3.1.x"},
+    {"dll": "discord_game_sdk.dll", "version": "2.x",   "size_min": 1_800_000, "size_max": 2_600_000,
+     "notes": "Discord Game SDK v2.x"},
+    {"dll": "discordrpc.dll",       "version": "1.x",   "size_min":   200_000, "size_max":   800_000,
+     "notes": "Legacy Discord Rich Presence SDK v1.x"},
+]
+
+VCRUNTIME140_KNOWN_GOOD: list[dict] = [
+    {"version": "14.38.x (VS2022 17.8)",  "size_min":  80_000, "size_max": 115_000,
+     "notes": "VS2022 17.8 redistributable"},
+    {"version": "14.40.x (VS2022 17.10)", "size_min":  80_000, "size_max": 115_000,
+     "notes": "VS2022 17.10 redistributable"},
+    {"version": "14.36.x (VS2022 17.6)",  "size_min":  78_000, "size_max": 112_000,
+     "notes": "VS2022 17.6 redistributable"},
+    {"version": "14.34.x (VS2022 17.4)",  "size_min":  76_000, "size_max": 110_000,
+     "notes": "VS2022 17.4 redistributable"},
+    {"version": "14.32.x (VS2022 17.2)",  "size_min":  75_000, "size_max": 108_000,
+     "notes": "VS2022 17.2 redistributable"},
+    {"version": "14.30.x (VS2022 17.0)",  "size_min":  74_000, "size_max": 106_000,
+     "notes": "VS2022 17.0 redistributable"},
+    {"version": "14.29.x (VS2019 16.11)", "size_min":  72_000, "size_max": 105_000,
+     "notes": "VS2019 16.11 redistributable"},
+    {"version": "14.28.x (VS2019 16.8)",  "size_min":  70_000, "size_max": 102_000,
+     "notes": "VS2019 16.8 redistributable"},
+    {"version": "14.26.x (VS2019 16.6)",  "size_min":  68_000, "size_max": 100_000,
+     "notes": "VS2019 16.6 redistributable"},
+    {"version": "14.16.x (VS2017 15.9)",  "size_min":  65_000, "size_max":  96_000,
+     "notes": "VS2017 15.9 final redistributable"},
+    {"version": "14.0.x  (VS2015 RTM)",   "size_min":  55_000, "size_max":  85_000,
+     "notes": "VS2015 RTM redistributable (oldest supported)"},
+    {"version": "14.x x86 (any VS2017-2022)", "size_min": 45_000, "size_max": 80_000,
+     "notes": "x86 32-bit build from SysWOW64 — smaller than x64 equivalent"},
+    {"version": "14.0.x x86 (VS2015)",        "size_min": 35_000, "size_max": 65_000,
+     "notes": "x86 32-bit VS2015 build from SysWOW64"},
+]
+
+VCRUNTIME140_1_KNOWN_GOOD: list[dict] = [
+    {"version": "14.38.x (VS2022 17.8)",  "size_min":  28_000, "size_max":  55_000,
+     "notes": "VS2022 17.8 redistributable"},
+    {"version": "14.40.x (VS2022 17.10)", "size_min":  28_000, "size_max":  55_000,
+     "notes": "VS2022 17.10 redistributable"},
+    {"version": "14.36.x (VS2022 17.6)",  "size_min":  27_000, "size_max":  54_000,
+     "notes": "VS2022 17.6 redistributable"},
+    {"version": "14.34.x (VS2022 17.4)",  "size_min":  27_000, "size_max":  53_000,
+     "notes": "VS2022 17.4 redistributable"},
+    {"version": "14.29.x (VS2019 16.11)", "size_min":  25_000, "size_max":  50_000,
+     "notes": "VS2019 16.11 redistributable"},
+    {"version": "14.28.x (VS2019 16.8)",  "size_min":  24_000, "size_max":  48_000,
+     "notes": "VS2019 16.8 redistributable (first version to ship this DLL)"},
+]
+
+CONCRT140_KNOWN_GOOD: list[dict] = [
+    {"version": "14.38.x (VS2022 17.8)",  "size_min": 300_000, "size_max": 420_000,
+     "notes": "VS2022 17.8 redistributable"},
+    {"version": "14.40.x (VS2022 17.10)", "size_min": 300_000, "size_max": 425_000,
+     "notes": "VS2022 17.10 redistributable"},
+    {"version": "14.36.x (VS2022 17.6)",  "size_min": 295_000, "size_max": 415_000,
+     "notes": "VS2022 17.6 redistributable"},
+    {"version": "14.34.x (VS2022 17.4)",  "size_min": 290_000, "size_max": 410_000,
+     "notes": "VS2022 17.4 redistributable"},
+    {"version": "14.29.x (VS2019 16.11)", "size_min": 275_000, "size_max": 395_000,
+     "notes": "VS2019 16.11 redistributable"},
+    {"version": "14.16.x (VS2017 15.9)",  "size_min": 250_000, "size_max": 370_000,
+     "notes": "VS2017 15.9 final redistributable"},
+    {"version": "14.0.x  (VS2015 RTM)",   "size_min": 210_000, "size_max": 320_000,
+     "notes": "VS2015 RTM redistributable"},
+]
+
+UCRTBASE_KNOWN_GOOD: list[dict] = [
+    {"version": "Win11 23H2 / 22631",  "size_min": 950_000, "size_max": 1_150_000,
+     "notes": "Windows 11 23H2 in-box ucrtbase.dll"},
+    {"version": "Win11 22H2 / 22621",  "size_min": 940_000, "size_max": 1_140_000,
+     "notes": "Windows 11 22H2 in-box ucrtbase.dll"},
+    {"version": "Win11 21H2 / 22000",  "size_min": 930_000, "size_max": 1_130_000,
+     "notes": "Windows 11 initial release in-box ucrtbase.dll"},
+    {"version": "Win10 22H2 / 19045",  "size_min": 900_000, "size_max": 1_100_000,
+     "notes": "Windows 10 22H2 in-box ucrtbase.dll"},
+    {"version": "Win10 21H2 / 19044",  "size_min": 895_000, "size_max": 1_095_000,
+     "notes": "Windows 10 21H2 in-box ucrtbase.dll"},
+    {"version": "Win10 20H2 / 19042",  "size_min": 885_000, "size_max": 1_085_000,
+     "notes": "Windows 10 20H2 in-box ucrtbase.dll"},
+    {"version": "Win10 1903 / 18362",  "size_min": 860_000, "size_max": 1_060_000,
+     "notes": "Windows 10 1903 in-box ucrtbase.dll"},
+    {"version": "Win10 RTM / 10240",   "size_min": 780_000, "size_max":   980_000,
+     "notes": "Windows 10 RTM in-box ucrtbase.dll (oldest)"},
+    {"version": "Win11 x86 (any build)",   "size_min": 620_000, "size_max": 880_000,
+     "notes": "x86 32-bit ucrtbase.dll from SysWOW64"},
+    {"version": "Win10 x86 (any build)",   "size_min": 580_000, "size_max": 860_000,
+     "notes": "x86 32-bit ucrtbase.dll from SysWOW64"},
+]
+
+RUNTIME_LEGIT_PATHS = (
+    "c:\\windows\\system32\\",
+    "c:\\windows\\syswow64\\",
+    "c:\\windows\\winsxs\\",
+    "c:\\program files (x86)\\microsoft visual studio\\",
+    "c:\\program files\\microsoft visual studio\\",
+    "c:\\program files (x86)\\common files\\microsoft shared\\",
+    "c:\\program files\\common files\\microsoft shared\\",
+    "c:\\program files (x86)\\microsoft visual c++",
+    "c:\\program files\\microsoft visual c++",
+)
+
+UCRTBASE_STRICT_PATHS = (
+    "c:\\windows\\system32\\",
+    "c:\\windows\\syswow64\\",
+    "c:\\windows\\winsxs\\",
+)
+
+RUNTIME_DLL_REGISTRY: dict = {
+    "vcruntime140.dll":   (VCRUNTIME140_KNOWN_GOOD,   2015,
+                           "VC++ 2015-2022 C Runtime (vcruntime140.dll)"),
+    "vcruntime140_1.dll": (VCRUNTIME140_1_KNOWN_GOOD, 2019,
+                           "VC++ 2019-2022 Extended C Runtime (vcruntime140_1.dll)"),
+    "concrt140.dll":      (CONCRT140_KNOWN_GOOD,      2015,
+                           "VC++ 2015-2022 Concurrency Runtime (concrt140.dll)"),
+    "ucrtbase.dll":       (UCRTBASE_KNOWN_GOOD,        2014,
+                           "Windows Universal C Runtime (ucrtbase.dll)"),
+}
+
+MSVCP140_LEGIT_PATHS = (
+    "c:\\windows\\system32\\",
+    "c:\\windows\\syswow64\\",
+    "c:\\windows\\winsxs\\",
+    "c:\\program files (x86)\\microsoft visual studio\\",
+    "c:\\program files\\microsoft visual studio\\",
+    "c:\\program files (x86)\\common files\\microsoft shared\\",
+    "c:\\program files\\common files\\microsoft shared\\",
+    "c:\\program files (x86)\\microsoft visual c++",
+    "c:\\program files\\microsoft visual c++",
+)
+
+DISCORD_LEGIT_PATH_FRAGMENTS = (
+    "\\discord\\",
+    "\\discordsdk\\",
+    "\\discord_game_sdk",
+    "\\discordrpc",
+)
+
+
+def verify_critical_dlls(parsed: dict) -> dict:
+    """Examine modules list from the dump and verify MSVCP140.dll and Discord RPC
+    for authenticity indicators: load path, PE timestamp, size plausibility.
+
+    Returns a dict:
+      {
+        "msvcp140":    <result dict or None>,
+        "discord":     <result dict or None>,   # may be list if multiple found
+        "summary":     str,
+      }
+    Each result dict has keys:
+      name, path, base, size, checksum, timestamp_raw, timestamp_date,
+      verdict,      # "OK" | "SUSPICIOUS" | "LIKELY_TAMPERED" | "NOT_FOUND"
+      verdict_colour,
+      issues,       # list of str
+      matched_ref,  # reference entry that matched, or None
+    """
+    modules = parsed.get("modules", [])
+
+    def _check_msvcp140(m: dict) -> dict:
+        sn   = Path(m["name"]).name.lower()
+        path = m["name"].lower().replace("/", "\\")
+        size = m.get("size", 0)
+        cs   = m.get("checksum", "0x00000000")
+        ts_raw = 0
+        ts_date = m.get("timestamp", "N/A")
+
+        issues = []
+        matched_ref = None
+
+        path_ok = any(path.startswith(p) for p in MSVCP140_LEGIT_PATHS)
+        is_game_local = not path_ok
+        if is_game_local:
+            issues.append(
+                f"Loaded from non-System32 path: {m['name']} — "
+                "legitimate if shipped by game installer, suspicious if not"
+            )
+
+        if size < 280_000:
+            issues.append(
+                f"File size {size:,} bytes is abnormally small for MSVCP140.dll "
+                "(x64 genuine copies ~420–660 KB, x86 copies ~350–530 KB) — "
+                "possible stub or trojanised replacement"
+            )
+        elif size > 900_000:
+            issues.append(
+                f"File size {size:,} bytes is abnormally large for MSVCP140.dll "
+                "(genuine copies are typically under 700 KB) — possible padded or injected file"
+            )
+        else:
+            for ref in MSVCP140_KNOWN_GOOD:
+                if ref["size_min"] <= size <= ref["size_max"]:
+                    matched_ref = ref
+                    break
+
+        if ts_date and ts_date != "N/A":
+            try:
+                year = int(ts_date[:4])
+                checksum_zeroed = cs in ("0x00000000", "0x0")
+                if year < 2015:
+                    issues.append(
+                        f"PE timestamp date {ts_date} predates MSVCP140.dll's existence "
+                        "(VC++ 2015 launched in July 2015) — timestamp likely forged"
+                    )
+                elif year > 2026:
+                    if checksum_zeroed:
+                        issues.append(
+                            f"PE timestamp {ts_date} is in the future AND the PE checksum "
+                            "is 0x00000000 — the combination of a future timestamp with a "
+                            "zeroed checksum strongly indicates tampering. "
+                            "(Legitimate reproducible-build DLLs have a future-looking hash "
+                            "timestamp but always retain a valid non-zero checksum.)"
+                        )
+            except Exception:
+                pass
+
+        if cs in ("0x00000000", "0x0"):
+            issues.append(
+                "PE checksum is 0x00000000 — Microsoft system and redistributable DLLs "
+                "always have a valid non-zero checksum. This copy has been modified or "
+                "assembled by a third-party tool."
+            )
+
+        if not issues:
+            verdict = "OK"
+            vc = GREEN
+        elif any("small" in i or "large" in i or "zeroed" in i or "forged" in i
+                 or "trojan" in i or "injected" in i for i in issues):
+            verdict = "LIKELY_TAMPERED"
+            vc = RED
+        else:
+            verdict = "SUSPICIOUS"
+            vc = YELLOW
+
+        return {
+            "name":         Path(m["name"]).name,
+            "path":         m["name"],
+            "base":         m.get("base", "?"),
+            "size":         size,
+            "checksum":     cs,
+            "timestamp_date": ts_date,
+            "verdict":      verdict,
+            "verdict_colour": vc,
+            "issues":       issues,
+            "matched_ref":  matched_ref,
+        }
+
+    def _check_discord(m: dict) -> dict:
+        sn   = Path(m["name"]).name.lower()
+        path = m["name"].lower().replace("/", "\\")
+        size = m.get("size", 0)
+        cs   = m.get("checksum", "0x00000000")
+        ts_date = m.get("timestamp", "N/A")
+        issues = []
+        matched_ref = None
+
+        ref_list = [r for r in DISCORD_KNOWN_GOOD if r["dll"] == sn]
+
+        in_system = any(p in path for p in ("\\windows\\system32", "\\windows\\syswow64", "\\winsxs\\"))
+        if in_system:
+            issues.append(
+                f"Discord DLL loaded from Windows system directory ({m['name']}) — "
+                "Discord DLLs are never Windows components; this is a DLL hijack or trojan"
+            )
+
+        if ref_list:
+            size_ok = any(r["size_min"] <= size <= r["size_max"] for r in ref_list)
+            if size_ok:
+                matched_ref = next(r for r in ref_list if r["size_min"] <= size <= r["size_max"])
+            elif size < min(r["size_min"] for r in ref_list):
+                issues.append(
+                    f"Size {size:,} bytes is smaller than any known genuine {sn} "
+                    f"(smallest known: {min(r['size_min'] for r in ref_list):,} bytes) — "
+                    "possible stub, stripped, or trojanised file"
+                )
+            else:
+                issues.append(
+                    f"Size {size:,} bytes doesn't match any known genuine {sn} version — "
+                    "could be a custom build or modified file"
+                )
+        else:
+            if size < 100_000:
+                issues.append(
+                    f"Unknown Discord variant '{sn}' with very small size {size:,} bytes — "
+                    "this doesn't match any known Discord SDK DLL"
+                )
+
+        if cs in ("0x00000000", "0x0"):
+            issues.append(
+                "PE checksum is 0x00000000 — official Discord SDK DLLs always have a "
+                "valid checksum. This copy appears to have been modified."
+            )
+        if ts_date and ts_date != "N/A":
+            try:
+                year = int(ts_date[:4])
+                checksum_zeroed = cs in ("0x00000000", "0x0")
+                if year < 2017:
+                    issues.append(
+                        f"PE timestamp {ts_date} predates Discord's SDK existence "
+                        "(Discord Rich Presence SDK launched 2017) — timestamp likely forged"
+                    )
+                elif year > 2026:
+                    if checksum_zeroed:
+                        issues.append(
+                            f"PE timestamp {ts_date} is in the future AND PE checksum is "
+                            "0x00000000 — this combination indicates tampering. "
+                            "(Reproducible-build DLLs have future-looking timestamps but "
+                            "always retain a valid non-zero checksum.)"
+                        )
+            except Exception:
+                pass
+
+        if not issues:
+            verdict = "OK"
+            vc = GREEN
+        elif any("system directory" in i or "trojan" in i or "hijack" in i
+                 or "stub" in i or "forged" in i for i in issues):
+            verdict = "LIKELY_TAMPERED"
+            vc = RED
+        else:
+            verdict = "SUSPICIOUS"
+            vc = YELLOW
+
+        return {
+            "name":         Path(m["name"]).name,
+            "path":         m["name"],
+            "base":         m.get("base", "?"),
+            "size":         size,
+            "checksum":     cs,
+            "timestamp_date": ts_date,
+            "verdict":      verdict,
+            "verdict_colour": vc,
+            "issues":       issues,
+            "matched_ref":  matched_ref,
+        }
+
+
+    def _check_runtime_dll(m: dict, dll_name: str) -> dict:
+        """Generic checker for VC++ runtime DLLs and ucrtbase.dll.
+        Uses RUNTIME_DLL_REGISTRY to select the right reference table and rules."""
+        sn    = dll_name
+        path  = m["name"].lower().replace("/", "\\")
+        size  = m.get("size", 0)
+        cs    = m.get("checksum", "0x00000000")
+        ts_date = m.get("timestamp", "N/A")
+        issues = []
+        matched_ref = None
+
+        ref_table, min_year, ui_label = RUNTIME_DLL_REGISTRY[sn]
+        is_ucrtbase = sn == "ucrtbase.dll"
+
+        strict_paths = UCRTBASE_STRICT_PATHS if is_ucrtbase else RUNTIME_LEGIT_PATHS
+        path_ok = any(path.startswith(p) for p in strict_paths)
+        if not path_ok:
+            if is_ucrtbase:
+                issues.append(
+                    f"ucrtbase.dll loaded from non-Windows path: {m['name']} — "
+                    "ucrtbase.dll is a Windows in-box component and must only load "
+                    "from System32 or SysWOW64. A game-local copy is a classic DLL "
+                    "hijack vector and should be treated as LIKELY_TAMPERED."
+                )
+            else:
+                issues.append(
+                    f"{Path(m['name']).name} loaded from non-standard path: {m['name']} — "
+                    "legitimate if shipped by a game installer alongside the exe, "
+                    "suspicious if the path is unexpected or temporary."
+                )
+        if size == 0:
+            issues.append(f"Size reported as 0 bytes — dump may be incomplete, or the "
+                          f"module header was corrupted/zeroed.")
+        else:
+            global_min = min(r["size_min"] for r in ref_table)
+            global_max = max(r["size_max"] for r in ref_table)
+            if size < global_min * 0.40:
+                issues.append(
+                    f"Size {size:,} bytes is far smaller than any known genuine "
+                    f"{sn} (smallest known reference: {global_min:,} bytes) — "
+                    "possible stub, stripped binary, or trojanised replacement."
+                )
+            elif size > global_max * 2.2:
+                issues.append(
+                    f"Size {size:,} bytes is far larger than any known genuine "
+                    f"{sn} (largest known reference: {global_max:,} bytes) — "
+                    "possible padded or injected file."
+                )
+            else:
+                for ref in ref_table:
+                    if ref["size_min"] <= size <= ref["size_max"]:
+                        matched_ref = ref
+                        break
+        if cs in ("0x00000000", "0x0"):
+            issues.append(
+                f"PE checksum is 0x00000000 — Microsoft runtime DLLs always have a "
+                f"valid non-zero checksum. This copy of {sn} has been modified or "
+                "assembled outside of Microsoft's build system."
+            )
+        SENTINEL_DATES = {"1970-01-01", "2005-03-24", "2005-04-16", "2014-06-17"}
+        if ts_date and ts_date != "N/A":
+            try:
+                year = int(ts_date[:4])
+                checksum_zeroed = cs in ("0x00000000", "0x0")
+                is_sentinel = ts_date[:10] in SENTINEL_DATES
+
+                if is_sentinel:
+                    if checksum_zeroed:
+                        issues.append(
+                            f"PE timestamp is a known Microsoft sentinel value ({ts_date}) "
+                            f"AND PE checksum is 0x00000000. Sentinel timestamps with a "
+                            f"zeroed checksum indicate the file has been modified outside "
+                            f"of Microsoft's build system."
+                        )
+                elif year < min_year:
+                    issues.append(
+                        f"PE timestamp {ts_date} predates the existence of {sn} "
+                        f"(first shipped {min_year}) — timestamp likely forged."
+                    )
+                elif year > 2026:
+                    if checksum_zeroed:
+                        issues.append(
+                            f"PE timestamp {ts_date} is in the future AND PE checksum is "
+                            "0x00000000. Legitimate reproducible-build DLLs have future-looking "
+                            "timestamps but always retain a valid checksum. This combination "
+                            f"indicates {sn} has been tampered with."
+                        )
+            except Exception:
+                pass
+
+        critical_keywords = (
+            "hijack", "trojan", "stub", "forged", "tampered", "non-Windows path",
+            "injected", "zeroed", "modified"
+        )
+        if not issues:
+            verdict = "OK"
+            vc = GREEN
+        elif any(kw in " ".join(issues).lower() for kw in critical_keywords):
+            verdict = "LIKELY_TAMPERED"
+            vc = RED
+        else:
+            verdict = "SUSPICIOUS"
+            vc = YELLOW
+
+        return {
+            "name":           Path(m["name"]).name,
+            "path":           m["name"],
+            "base":           m.get("base", "?"),
+            "size":           size,
+            "checksum":       cs,
+            "timestamp_date": ts_date,
+            "verdict":        verdict,
+            "verdict_colour": vc,
+            "issues":         issues,
+            "matched_ref":    matched_ref,
+            "ui_label":       ui_label,
+        }
+
+    msvcp140_result  = None
+    discord_results  = []
+    runtime_results  = {}
+
+    DISCORD_DLL_NAMES = {"discord_game_sdk.dll", "discordrpc.dll", "discord-rpc.dll",
+                         "discordgamesdk.dll", "discord_rpc.dll"}
+
+    for m in modules:
+        sn = Path(m["name"]).name.lower()
+        if sn == "msvcp140.dll":
+            msvcp140_result = _check_msvcp140(m)
+        elif sn in DISCORD_DLL_NAMES:
+            discord_results.append(_check_discord(m))
+        elif sn in RUNTIME_DLL_REGISTRY:
+            runtime_results[sn] = _check_runtime_dll(m, sn)
+
+    SKIP_FROM_MISMATCH = {"ucrtbase.dll"}
+    VCRUNTIME140_1_KEY = "vcruntime140_1.dll"
+
+    def _version_family(version_str: str) -> str | None:
+        """Extract VS generation from a reference version string.
+        Returns None for entries that should be excluded from mismatch comparison."""
+        if not version_str:
+            return None
+        if "x86" in version_str.lower():
+            return None
+        for fam in ("VS2022", "VS2019", "VS2017", "VS2015"):
+            if fam in version_str:
+                return fam
+        return None
+
+    family_map = {}
+    if msvcp140_result and msvcp140_result.get("matched_ref"):
+        fam = _version_family(msvcp140_result["matched_ref"]["version"])
+        if fam:
+            family_map["msvcp140.dll"] = fam
+
+    for dll_name, res in runtime_results.items():
+        if dll_name in SKIP_FROM_MISMATCH:
+            continue
+        if dll_name == VCRUNTIME140_1_KEY:
+            msvcp_fam = family_map.get("msvcp140.dll", "")
+            if msvcp_fam not in ("VS2019", "VS2022"):
+                continue
+        if res.get("matched_ref"):
+            fam = _version_family(res["matched_ref"]["version"])
+            if fam:
+                family_map[dll_name] = fam
+
+    unique_families = set(family_map.values())
+    if len(unique_families) > 1:
+        family_list = ", ".join(f"{k}: {v}" for k, v in family_map.items())
+        mismatch_msg = (
+            f"VC++ runtime generation mismatch detected: [{family_list}]. "
+            "All VC++ 140-family DLLs should come from the same Visual Studio generation. "
+            "A mismatch across generations (e.g. VS2017 vs VS2022) indicates a partial "
+            "update, corrupted install, or deliberate replacement of one DLL. "
+            "This can cause crashes and is worth investigating."
+        )
+        if msvcp140_result and "msvcp140.dll" in family_map:
+            msvcp140_result["issues"].append(mismatch_msg)
+            if msvcp140_result["verdict"] == "OK":
+                msvcp140_result["verdict"] = "SUSPICIOUS"
+                msvcp140_result["verdict_colour"] = YELLOW
+        for dll_name, res in runtime_results.items():
+            if dll_name in family_map:
+                res["issues"].append(mismatch_msg)
+                if res["verdict"] == "OK":
+                    res["verdict"] = "SUSPICIOUS"
+                    res["verdict_colour"] = YELLOW
+
+    lines = []
+    if msvcp140_result:
+        v = msvcp140_result["verdict"]
+        lines.append(f"MSVCP140.dll : {v}")
+        if msvcp140_result["matched_ref"]:
+            lines.append(f"  Matched ref : {msvcp140_result['matched_ref']['version']}")
+        for iss in msvcp140_result["issues"]:
+            lines.append(f"  ⚠ {iss}")
+    else:
+        lines.append("MSVCP140.dll : NOT FOUND in module list")
+
+    if discord_results:
+        for dr in discord_results:
+            lines.append(f"{dr['name']} : {dr['verdict']}")
+            if dr["matched_ref"]:
+                lines.append(f"  Matched ref : {dr['matched_ref']['version']}")
+            for iss in dr["issues"]:
+                lines.append(f"  ⚠ {iss}")
+    else:
+        lines.append("Discord RPC / Game SDK : NOT FOUND in module list")
+
+    for dll_name, res in runtime_results.items():
+        v = res["verdict"]
+        lines.append(f"{res['name']} : {v}")
+        if res.get("matched_ref"):
+            lines.append(f"  Matched ref : {res['matched_ref']['version']}")
+        for iss in res["issues"]:
+            lines.append(f"  ⚠ {iss}")
+    for sn in RUNTIME_DLL_REGISTRY:
+        if sn not in runtime_results:
+            lines.append(f"{sn} : NOT FOUND in module list")
+
+    return {
+        "msvcp140": msvcp140_result,
+        "discord":  discord_results,
+        "runtime":  runtime_results,
+        "summary":  "\n".join(lines),
+    }
+
+
 def annotate_frame(mod_name: str, offset: int) -> str:
 
     n = (mod_name or "").lower()
@@ -3142,6 +3741,7 @@ class CrashAnalyzer(tk.Tk):
         self._tab_modules   = self._make_tab("Modules")
         self._tab_threads   = self._make_tab("Threads")
         self._tab_hints     = self._make_tab("Quick Hints")
+        self._tab_dllverify = self._make_tab("\U0001f50d DLL Verify")
 
         self._simple_frame   = tk.Frame(self._tab_simple,   bg=BG); self._simple_frame.pack(fill="both", expand=True)
         self._overview_txt   = self._make_text(self._tab_overview, MONO, 10)
@@ -3149,6 +3749,7 @@ class CrashAnalyzer(tk.Tk):
         self._modules_frame  = self._make_table_frame(self._tab_modules)
         self._threads_frame  = tk.Frame(self._tab_threads, bg=BG); self._threads_frame.pack(fill="both", expand=True)
         self._hints_frame    = tk.Frame(self._tab_hints,   bg=BG); self._hints_frame.pack(fill="both", expand=True)
+        self._dllverify_frame= tk.Frame(self._tab_dllverify, bg=BG); self._dllverify_frame.pack(fill="both", expand=True)
 
         self._status_var = tk.StringVar(value="Ready – open a .dmp file to begin")
         status = tk.Frame(self, bg=BG2, pady=4, padx=16)
@@ -3190,8 +3791,6 @@ class CrashAnalyzer(tk.Tk):
         if not path:
             return
         self._file_var.set(path)
-        # FIX BUG-6: Disable the open button while parsing to prevent races
-        # if the user clicks again before the background thread finishes.
         self._open_btn.config(state="disabled")
         self._status("Parsing minidump …", busy=True)
 
@@ -3261,11 +3860,211 @@ class CrashAnalyzer(tk.Tk):
             w.destroy()
         self._build_hints(hints, parsed.get("exception"))
 
+        for w in self._dllverify_frame.winfo_children():
+            w.destroy()
+        dll_verify = verify_critical_dlls(parsed)
+        self._build_dllverify(dll_verify)
+
         self._open_btn.config(state="normal")
         self._status(f"Parsed OK – {len(parsed.get('modules',[]))} modules, "
                      f"exception: {parsed.get('exception',{}).get('code','none')}",
                      busy=False)
         self._nb.select(0)
+
+
+    def _build_dllverify(self, dll_verify: dict) -> None:
+        """Render the DLL Verify tab showing authenticity analysis of MSVCP140.dll
+        and Discord RPC / Game SDK DLLs extracted from the minidump module list."""
+        parent = self._dllverify_frame
+
+        hdr = tk.Frame(parent, bg=BG2, padx=16, pady=10)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="DLL Authenticity Verification",
+                 bg=BG2, fg=ACCENT, font=("Consolas", 12, "bold")).pack(side="left")
+        tk.Label(hdr,
+                 text="  Checks MSVCP140.dll and Discord RPC/Game SDK for path, size, "
+                      "PE checksum, and timestamp anomalies",
+                 bg=BG2, fg=TEXT_DIM, font=("Consolas", 8)).pack(side="left")
+
+        leg = tk.Frame(parent, bg=BG3, padx=16, pady=6)
+        leg.pack(fill="x")
+        for colour, label in [
+            (GREEN,    "  OK - matches known-good reference"),
+            (YELLOW,   "  SUSPICIOUS - minor anomaly, investigate"),
+            (RED,      "  LIKELY_TAMPERED - strong authenticity failure"),
+            (TEXT_DIM, "  NOT_FOUND - DLL absent from module list"),
+        ]:
+            tk.Label(leg, text=label, bg=BG3, fg=colour,
+                     font=("Consolas", 8)).pack(side="left", padx=14)
+
+        canvas = tk.Canvas(parent, bg=BG, highlightthickness=0)
+        sb = tk.Scrollbar(parent, orient="vertical", command=canvas.yview,
+                          bg=BG2, troughcolor=BG, relief="flat")
+        inner = tk.Frame(canvas, bg=BG)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._bind_scroll(canvas)
+
+        VERDICT_ICONS = {"OK": "[OK]", "SUSPICIOUS": "[!!]",
+                         "LIKELY_TAMPERED": "[XX]", "NOT_FOUND": "[??]"}
+
+        def _render_card(result, section_title):
+            tk.Label(inner, text=section_title, bg=BG, fg=TEXT_DIM,
+                     font=("Consolas", 9, "bold"), anchor="w").pack(fill="x", padx=18, pady=(14, 0))
+
+            if result is None:
+                card = tk.Frame(inner, bg=BG2, padx=16, pady=10)
+                card.pack(fill="x", padx=12, pady=4)
+                tk.Label(card, text="[??] NOT FOUND in dump module list",
+                         bg=BG2, fg=TEXT_DIM, font=("Consolas", 10)).pack(anchor="w")
+                tk.Label(card,
+                         text="This DLL was not loaded at crash time. It may not be used "
+                              "by this game, or it failed to load before the crash.",
+                         bg=BG2, fg=TEXT_DIM, font=("Consolas", 8),
+                         wraplength=780, justify="left").pack(anchor="w", pady=(4, 0))
+                return
+
+            verdict = result["verdict"]
+            vc = result["verdict_colour"]
+            icon = VERDICT_ICONS.get(verdict, "?")
+            ref = result.get("matched_ref")
+
+            card = tk.Frame(inner, bg=BG2, padx=16, pady=12,
+                            highlightthickness=1, highlightbackground=vc)
+            card.pack(fill="x", padx=12, pady=4)
+
+            top = tk.Frame(card, bg=BG2)
+            top.pack(fill="x")
+            tk.Label(top, text=f" {icon} {verdict} ",
+                     bg=vc, fg="#111111" if vc == GREEN else "white",
+                     font=("Consolas", 10, "bold"), padx=6, pady=2).pack(side="left")
+            tk.Label(top, text=f"  {result['name']}",
+                     bg=BG2, fg=vc, font=("Consolas", 11, "bold")).pack(side="left")
+
+            meta = tk.Frame(card, bg=BG2)
+            meta.pack(fill="x", pady=(8, 4))
+
+            def _kv(lbl, val, fg=TEXT):
+                row = tk.Frame(meta, bg=BG2)
+                row.pack(anchor="w")
+                tk.Label(row, text=f"{lbl:<22}", bg=BG2, fg=TEXT_DIM,
+                         font=("Consolas", 9)).pack(side="left")
+                tk.Label(row, text=str(val), bg=BG2, fg=fg,
+                         font=("Consolas", 9)).pack(side="left")
+
+            _kv("Path",          result["path"])
+            _kv("Base address",  result["base"])
+            size_val = f"{result['size']:,} bytes" if result.get("size") else "unknown"
+            _kv("Size",          size_val)
+            cs = result.get("checksum", "")
+            _kv("PE checksum",   cs,
+                fg=RED if cs in ("0x00000000", "0x0") else TEXT)
+            _kv("PE timestamp",  result.get("timestamp_date", "N/A"))
+            if ref:
+                _kv("Matched version", ref.get("version", ref.get("dll", "?")), fg=GREEN)
+                _kv("Version note",    ref.get("notes", ""), fg=TEXT_DIM)
+
+            if result.get("issues"):
+                tk.Frame(card, bg=BG3, height=1).pack(fill="x", pady=(8, 4))
+                tk.Label(card, text="Issues detected:", bg=BG2, fg=YELLOW,
+                         font=("Consolas", 9, "bold")).pack(anchor="w")
+                for iss in result["issues"]:
+                    row = tk.Frame(card, bg=BG2)
+                    row.pack(fill="x", pady=1)
+                    tk.Label(row, text="  [!] ", bg=BG2, fg=YELLOW,
+                             font=("Consolas", 9)).pack(side="left")
+                    tk.Label(row, text=iss, bg=BG2, fg=YELLOW,
+                             font=("Consolas", 9), wraplength=740,
+                             justify="left", anchor="w").pack(side="left", fill="x")
+            else:
+                tk.Label(card, text="  No authenticity issues detected.",
+                         bg=BG2, fg=GREEN, font=("Consolas", 9)).pack(anchor="w", pady=(6, 0))
+
+        tk.Label(inner, text="  VC++ Runtime DLLs",
+                 bg=BG, fg=ACCENT, font=("Consolas", 10, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=(18, 2))
+        tk.Frame(inner, bg=BG3, height=1).pack(fill="x", padx=12, pady=(0, 4))
+
+        _render_card(dll_verify.get("msvcp140"),
+                     "MSVCP140.dll  (Visual C++ 2015-2022 C++ Standard Library)")
+
+        runtime = dll_verify.get("runtime", {})
+        RUNTIME_ORDER = [
+            ("vcruntime140.dll",   "VCRUNTIME140.dll  (Visual C++ 2015-2022 C Runtime)"),
+            ("vcruntime140_1.dll", "VCRUNTIME140_1.dll  (Visual C++ 2019-2022 Extended C Runtime)"),
+            ("concrt140.dll",      "CONCRT140.dll  (Visual C++ 2015-2022 Concurrency Runtime)"),
+            ("ucrtbase.dll",       "ucrtbase.dll  (Windows Universal C Runtime — in-box Windows component)"),
+        ]
+        for dll_key, section_label in RUNTIME_ORDER:
+            result = runtime.get(dll_key)
+            if result is not None:
+                _render_card(result, section_label)
+            else:
+                tk.Label(inner, text=section_label, bg=BG, fg=TEXT_DIM,
+                         font=("Consolas", 9, "bold"), anchor="w").pack(
+                             fill="x", padx=18, pady=(14, 0))
+                absent_card = tk.Frame(inner, bg=BG2, padx=16, pady=6)
+                absent_card.pack(fill="x", padx=12, pady=2)
+                absent_note = {
+                    "vcruntime140.dll":   "Not found — may indicate a VS2013-or-older game, "
+                                          "or the DLL was statically linked.",
+                    "vcruntime140_1.dll": "Not found — normal for VS2017/VS2015 games. "
+                                          "Only present when compiled with VS2019+ C++20 features.",
+                    "concrt140.dll":      "Not found — normal. Only loaded if the game uses "
+                                          "the Parallel Patterns Library (PPL) or async tasks.",
+                    "ucrtbase.dll":       "Not found in module list — may have been loaded "
+                                          "implicitly via delay-load or the dump truncated module entries.",
+                }.get(dll_key, "Not present in module list.")
+                tk.Label(absent_card, text=f"[--] NOT IN DUMP  —  {absent_note}",
+                         bg=BG2, fg=TEXT_DIM, font=("Consolas", 8),
+                         wraplength=800, justify="left", anchor="w").pack(anchor="w")
+
+        tk.Label(inner, text="  Discord RPC / Game SDK",
+                 bg=BG, fg=ACCENT, font=("Consolas", 10, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=(22, 2))
+        tk.Frame(inner, bg=BG3, height=1).pack(fill="x", padx=12, pady=(0, 4))
+
+        discord_list = dll_verify.get("discord", [])
+        if discord_list:
+            for dr in discord_list:
+                _render_card(dr, f"{dr['name']}  (Discord Rich Presence / Game SDK)")
+        else:
+            _render_card(None,
+                         "Discord RPC / Game SDK  (discord_game_sdk.dll / DiscordRPC.dll)")
+
+        tk.Label(inner, text="What this verification checks",
+                 bg=BG, fg=TEXT_DIM, font=("Consolas", 9, "bold"),
+                 anchor="w").pack(fill="x", padx=18, pady=(20, 0))
+        info = tk.Frame(inner, bg=BG3, padx=16, pady=10)
+        info.pack(fill="x", padx=12, pady=(4, 20))
+        info_lines = [
+            "Load path      - Is the DLL loaded from a legitimate location? "
+              "(e.g. MSVCP140 from System32 or a known VC++ redist folder)",
+            "Size           - Is the file size consistent with any known official release? "
+              "Abnormally small files may be stubs or trojans.",
+            "PE checksum    - Microsoft and Discord always set a non-zero PE checksum. "
+              "A zero checksum means the file was modified or built by a third-party tool.",
+            "PE timestamp   - Is the DLL timestamp within a valid date range for this DLL? "
+              "Timestamps predating the DLL's existence are flagged. NOTE: future-looking "
+              "timestamps alone (e.g. 2056-12-30) are NOT flagged — Microsoft uses "
+              "Reproducible Builds from VS2017+ which store a content hash in the timestamp "
+              "field, producing dates far in the future. This is legitimate. Only a future "
+              "timestamp combined with a zeroed checksum indicates tampering.",
+            "",
+            "Note: This reads data embedded in the minidump only - it cannot read the actual "
+              "on-disk DLL bytes or verify an Authenticode digital signature. For full "
+              "verification, run sigcheck.exe (Sysinternals) on the on-disk copy.",
+        ]
+        for line in info_lines:
+            tk.Label(info, text=line, bg=BG3, fg=TEXT_DIM,
+                     font=("Consolas", 8), anchor="w",
+                     wraplength=820, justify="left").pack(anchor="w", pady=1)
+
+        inner.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+
 
     def _build_module_table(self, modules, crash_mod_name=None, highlight=None):
         legend = tk.Frame(self._modules_frame, bg=BG2, padx=12, pady=6)
