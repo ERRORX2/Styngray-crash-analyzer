@@ -1,5 +1,11 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
+
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _DND_AVAILABLE = True
+except ImportError:
+    _DND_AVAILABLE = False
 import threading
 import json
 import re
@@ -7,7 +13,7 @@ import struct
 import os
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 BG        = "#0e1117"
 BG2       = "#161b22"
@@ -433,9 +439,10 @@ def parse_minidump(path: str) -> dict:
 
     return result
 
+
 MSVCP140_KNOWN_GOOD: list[dict] = [
     {"version": "14.38.x (VS2022 17.8)",  "timestamp": 0x6543C0D5, "size_min": 570_000, "size_max": 620_000,
-     "notes": "VS2022 17.8 redistributable — standard shipping version"},
+     "notes": "VS2022 17.8 redistributable - standard shipping version"},
     {"version": "14.40.x (VS2022 17.10)", "timestamp": 0x6656D2F0, "size_min": 570_000, "size_max": 625_000,
      "notes": "VS2022 17.10 redistributable"},
     {"version": "14.36.x (VS2022 17.6)",  "timestamp": 0x6458F060, "size_min": 565_000, "size_max": 615_000,
@@ -457,14 +464,14 @@ MSVCP140_KNOWN_GOOD: list[dict] = [
     {"version": "14.0.x (VS2015 RTM)",    "timestamp": 0x55C1C4C0, "size_min": 420_000, "size_max": 490_000,
      "notes": "VS2015 RTM redistributable (oldest supported)"},
     {"version": "14.x x86 (VS2017-2022)", "timestamp": 0,          "size_min": 380_000, "size_max": 530_000,
-     "notes": "x86 32-bit build — loaded from SysWOW64 by 32-bit processes"},
+     "notes": "x86 32-bit build - loaded from SysWOW64 by 32-bit processes"},
     {"version": "14.0.x x86 (VS2015)",    "timestamp": 0,          "size_min": 300_000, "size_max": 430_000,
      "notes": "x86 32-bit VS2015 build from SysWOW64"},
 ]
 
 DISCORD_KNOWN_GOOD: list[dict] = [
     {"dll": "discord_game_sdk.dll", "version": "3.2.1", "size_min": 2_500_000, "size_max": 3_200_000,
-     "notes": "Discord Game SDK v3.2.1 — current official release"},
+     "notes": "Discord Game SDK v3.2.1 - current official release"},
     {"dll": "discord_game_sdk.dll", "version": "3.1.x", "size_min": 2_400_000, "size_max": 3_100_000,
      "notes": "Discord Game SDK v3.1.x"},
     {"dll": "discord_game_sdk.dll", "version": "2.x",   "size_min": 1_800_000, "size_max": 2_600_000,
@@ -472,6 +479,8 @@ DISCORD_KNOWN_GOOD: list[dict] = [
     {"dll": "discordrpc.dll",       "version": "1.x",   "size_min":   200_000, "size_max":   800_000,
      "notes": "Legacy Discord Rich Presence SDK v1.x"},
 ]
+
+
 
 VCRUNTIME140_KNOWN_GOOD: list[dict] = [
     {"version": "14.38.x (VS2022 17.8)",  "size_min":  80_000, "size_max": 115_000,
@@ -497,7 +506,7 @@ VCRUNTIME140_KNOWN_GOOD: list[dict] = [
     {"version": "14.0.x  (VS2015 RTM)",   "size_min":  55_000, "size_max":  85_000,
      "notes": "VS2015 RTM redistributable (oldest supported)"},
     {"version": "14.x x86 (any VS2017-2022)", "size_min": 45_000, "size_max": 80_000,
-     "notes": "x86 32-bit build from SysWOW64 — smaller than x64 equivalent"},
+     "notes": "x86 32-bit build from SysWOW64 - smaller than x64 equivalent"},
     {"version": "14.0.x x86 (VS2015)",        "size_min": 35_000, "size_max": 65_000,
      "notes": "x86 32-bit VS2015 build from SysWOW64"},
 ]
@@ -640,26 +649,27 @@ def verify_critical_dlls(parsed: dict) -> dict:
         is_game_local = not path_ok
         if is_game_local:
             issues.append(
-                f"Loaded from non-System32 path: {m['name']} — "
+                f"Loaded from non-System32 path: {m['name']} - "
                 "legitimate if shipped by game installer, suspicious if not"
             )
 
         if size < 280_000:
             issues.append(
                 f"File size {size:,} bytes is abnormally small for MSVCP140.dll "
-                "(x64 genuine copies ~420–660 KB, x86 copies ~350–530 KB) — "
+                "(x64 genuine copies ~420–660 KB, x86 copies ~350–530 KB) - "
                 "possible stub or trojanised replacement"
             )
         elif size > 900_000:
             issues.append(
                 f"File size {size:,} bytes is abnormally large for MSVCP140.dll "
-                "(genuine copies are typically under 700 KB) — possible padded or injected file"
+                "(genuine copies are typically under 700 KB) - possible padded or injected file"
             )
         else:
             for ref in MSVCP140_KNOWN_GOOD:
                 if ref["size_min"] <= size <= ref["size_max"]:
                     matched_ref = ref
                     break
+
         if ts_date and ts_date != "N/A":
             try:
                 year = int(ts_date[:4])
@@ -667,13 +677,13 @@ def verify_critical_dlls(parsed: dict) -> dict:
                 if year < 2015:
                     issues.append(
                         f"PE timestamp date {ts_date} predates MSVCP140.dll's existence "
-                        "(VC++ 2015 launched in July 2015) — timestamp likely forged"
+                        "(VC++ 2015 launched in July 2015) - timestamp likely forged"
                     )
                 elif year > 2026:
                     if checksum_zeroed:
                         issues.append(
                             f"PE timestamp {ts_date} is in the future AND the PE checksum "
-                            "is 0x00000000 — the combination of a future timestamp with a "
+                            "is 0x00000000 - the combination of a future timestamp with a "
                             "zeroed checksum strongly indicates tampering. "
                             "(Legitimate reproducible-build DLLs have a future-looking hash "
                             "timestamp but always retain a valid non-zero checksum.)"
@@ -683,7 +693,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
 
         if cs in ("0x00000000", "0x0"):
             issues.append(
-                "PE checksum is 0x00000000 — Microsoft system and redistributable DLLs "
+                "PE checksum is 0x00000000 - Microsoft system and redistributable DLLs "
                 "always have a valid non-zero checksum. This copy has been modified or "
                 "assembled by a third-party tool."
             )
@@ -726,7 +736,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
         in_system = any(p in path for p in ("\\windows\\system32", "\\windows\\syswow64", "\\winsxs\\"))
         if in_system:
             issues.append(
-                f"Discord DLL loaded from Windows system directory ({m['name']}) — "
+                f"Discord DLL loaded from Windows system directory ({m['name']}) - "
                 "Discord DLLs are never Windows components; this is a DLL hijack or trojan"
             )
 
@@ -737,24 +747,24 @@ def verify_critical_dlls(parsed: dict) -> dict:
             elif size < min(r["size_min"] for r in ref_list):
                 issues.append(
                     f"Size {size:,} bytes is smaller than any known genuine {sn} "
-                    f"(smallest known: {min(r['size_min'] for r in ref_list):,} bytes) — "
+                    f"(smallest known: {min(r['size_min'] for r in ref_list):,} bytes) - "
                     "possible stub, stripped, or trojanised file"
                 )
             else:
                 issues.append(
-                    f"Size {size:,} bytes doesn't match any known genuine {sn} version — "
+                    f"Size {size:,} bytes doesn't match any known genuine {sn} version - "
                     "could be a custom build or modified file"
                 )
         else:
             if size < 100_000:
                 issues.append(
-                    f"Unknown Discord variant '{sn}' with very small size {size:,} bytes — "
+                    f"Unknown Discord variant '{sn}' with very small size {size:,} bytes - "
                     "this doesn't match any known Discord SDK DLL"
                 )
 
         if cs in ("0x00000000", "0x0"):
             issues.append(
-                "PE checksum is 0x00000000 — official Discord SDK DLLs always have a "
+                "PE checksum is 0x00000000 - official Discord SDK DLLs always have a "
                 "valid checksum. This copy appears to have been modified."
             )
 
@@ -765,13 +775,13 @@ def verify_critical_dlls(parsed: dict) -> dict:
                 if year < 2017:
                     issues.append(
                         f"PE timestamp {ts_date} predates Discord's SDK existence "
-                        "(Discord Rich Presence SDK launched 2017) — timestamp likely forged"
+                        "(Discord Rich Presence SDK launched 2017) - timestamp likely forged"
                     )
                 elif year > 2026:
                     if checksum_zeroed:
                         issues.append(
                             f"PE timestamp {ts_date} is in the future AND PE checksum is "
-                            "0x00000000 — this combination indicates tampering. "
+                            "0x00000000 - this combination indicates tampering. "
                             "(Reproducible-build DLLs have future-looking timestamps but "
                             "always retain a valid non-zero checksum.)"
                         )
@@ -822,20 +832,20 @@ def verify_critical_dlls(parsed: dict) -> dict:
         if not path_ok:
             if is_ucrtbase:
                 issues.append(
-                    f"ucrtbase.dll loaded from non-Windows path: {m['name']} — "
+                    f"ucrtbase.dll loaded from non-Windows path: {m['name']} - "
                     "ucrtbase.dll is a Windows in-box component and must only load "
                     "from System32 or SysWOW64. A game-local copy is a classic DLL "
                     "hijack vector and should be treated as LIKELY_TAMPERED."
                 )
             else:
                 issues.append(
-                    f"{Path(m['name']).name} loaded from non-standard path: {m['name']} — "
+                    f"{Path(m['name']).name} loaded from non-standard path: {m['name']} - "
                     "legitimate if shipped by a game installer alongside the exe, "
                     "suspicious if the path is unexpected or temporary."
                 )
 
         if size == 0:
-            issues.append(f"Size reported as 0 bytes — dump may be incomplete, or the "
+            issues.append(f"Size reported as 0 bytes - dump may be incomplete, or the "
                           f"module header was corrupted/zeroed.")
         else:
             global_min = min(r["size_min"] for r in ref_table)
@@ -843,13 +853,13 @@ def verify_critical_dlls(parsed: dict) -> dict:
             if size < global_min * 0.40:
                 issues.append(
                     f"Size {size:,} bytes is far smaller than any known genuine "
-                    f"{sn} (smallest known reference: {global_min:,} bytes) — "
+                    f"{sn} (smallest known reference: {global_min:,} bytes) - "
                     "possible stub, stripped binary, or trojanised replacement."
                 )
             elif size > global_max * 2.2:
                 issues.append(
                     f"Size {size:,} bytes is far larger than any known genuine "
-                    f"{sn} (largest known reference: {global_max:,} bytes) — "
+                    f"{sn} (largest known reference: {global_max:,} bytes) - "
                     "possible padded or injected file."
                 )
             else:
@@ -860,7 +870,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
 
         if cs in ("0x00000000", "0x0"):
             issues.append(
-                f"PE checksum is 0x00000000 — Microsoft runtime DLLs always have a "
+                f"PE checksum is 0x00000000 - Microsoft runtime DLLs always have a "
                 f"valid non-zero checksum. This copy of {sn} has been modified or "
                 "assembled outside of Microsoft's build system."
             )
@@ -883,7 +893,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
                 elif year < min_year:
                     issues.append(
                         f"PE timestamp {ts_date} predates the existence of {sn} "
-                        f"(first shipped {min_year}) — timestamp likely forged."
+                        f"(first shipped {min_year}) - timestamp likely forged."
                     )
                 elif year > 2026:
                     if checksum_zeroed:
@@ -895,6 +905,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
                         )
             except Exception:
                 pass
+
 
 
         critical_keywords = (
@@ -954,7 +965,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
         for fam in ("VS2022", "VS2019", "VS2017", "VS2015"):
             if fam in version_str:
                 return fam
-        return None 
+        return None
 
     family_map = {}
     if msvcp140_result and msvcp140_result.get("matched_ref"):
@@ -1196,7 +1207,7 @@ def annotate_frame(mod_name: str, offset: int) -> str:
     if "reshade" in n:
         return "ReShade post-processing (D3D hook)"
     if "minhook" in n or "minhook64" in n:
-        return "MinHook (function hooking library — possible mod injection)"
+        return "MinHook (function hooking library - possible mod injection)"
 
     if "crs-client" in n:
         return "Arrowhead crash reporter"
@@ -1416,9 +1427,9 @@ def analyse_threads(parsed: dict) -> list:
             _params = _ex.get("params", [])
             _suicide = (_code == 0xC0000005 and len(_params) >= 2
                         and _params[0] == "0x1" and _params[1] == "0x0")
-            doing = ("Raised the crash exception — engine suicide (intentional write to null)"
+            doing = ("Raised the crash exception - engine suicide (intentional write to null)"
                      if _suicide else
-                     "Raised the crash exception — see Root Cause tab for details")
+                     "Raised the crash exception - see Root Cause tab for details")
         elif is_handler:
             doing = f"{CRASH_HANDLER_DLLS[short_lower]} - byproduct of crash"
         elif wait_detail:
@@ -1516,7 +1527,7 @@ def _detect_recursion(parsed: dict) -> str:
         ptr += 8
 
     if not addr_counts:
-        return ("Stack overflow — no readable stack data. "
+        return ("Stack overflow - no readable stack data. "
                 "Likely infinite recursion but could not identify the function.")
 
     top = sorted(addr_counts.items(), key=lambda x: x[1], reverse=True)
@@ -1531,14 +1542,12 @@ def _detect_recursion(parsed: dict) -> str:
                                 f"{top_mod}+0x{top_off:X} (×{top_count}) "
                                 f"calling back to {second_mod}+0x{second_off:X} (×{second_count}).")
 
-        return (f"Infinite recursion detected — {top_mod}+0x{top_off:X} appears {top_count} times "
+        return (f"Infinite recursion detected - {top_mod}+0x{top_off:X} appears {top_count} times "
                 f"on the stack, indicating a function calling itself repeatedly.{pattern_desc} "
-                f"Without PDB symbols the function name is unknown. "
-                f"Use WinDbg: open the dump, run '~<crash_tid>s ; kb 30' to see the repeating frames, "
-                f"then '.frame N ; dv' to inspect local variables at one of the repeated frames.")
+                f"The module and offset are shown above - share this dump with the development team for resolution.")
     else:
         most_common = f"{top_mod}+0x{top_off:X}" if top_mod else "unknown"
-        return (f"Stack overflow — no single function dominates the stack (most common frame: "
+        return (f"Stack overflow - no single function dominates the stack (most common frame: "
                 f"{most_common} ×{top_count}). "
                 f"May be an extremely deep call chain rather than circular recursion, "
                 f"or a very large stack-allocated buffer inside a function. "
@@ -1581,13 +1590,13 @@ def _find_dll_init_suspect(parsed: dict) -> str:
     if "msvcp140.dll" not in mod_names_lower and "vcruntime140.dll" not in mod_names_lower:
         missing.append("MSVCP140.dll / VCRUNTIME140.dll (Visual C++ 2015-2022 Redistributable)")
     if "ucrtbase.dll" not in mod_names_lower:
-        missing.append("ucrtbase.dll (Windows Universal CRT — may need Windows Update)")
+        missing.append("ucrtbase.dll (Windows Universal CRT - may need Windows Update)")
 
     if missing:
         return (f"No specific DLL was identified from the crash address. "
                 f"However, the following expected runtime DLLs are absent from the module list: "
                 f"{', '.join(missing)}. "
-                f"A missing dependency is a common cause of DLL_INIT_FAILED — the game DLL loads "
+                f"A missing dependency is a common cause of DLL_INIT_FAILED - the game DLL loads "
                 f"but its imports can\'t be resolved because a required DLL isn\'t present. "
                 f"Install the Visual C++ 2015-2022 Redistributable and run Windows Update.")
 
@@ -1811,7 +1820,7 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
         if "c0000142" in code:
             dll_suspect = _find_dll_init_suspect(parsed)
             hints.insert(0, ("DLL Initialisation Failed (0xC0000142)",
-                "A DLL failed to initialise during process startup — game never reached main()", RED,
+                "A DLL failed to initialise during process startup - game never reached main()", RED,
                 dll_suspect))
         if "80000003" in code:
             hints.append(("Breakpoint in Release Build", "__debugbreak() or assert left in shipping code", YELLOW,
@@ -1856,6 +1865,7 @@ def _identify_bad_register(decoded_instr: dict, null_regs: dict, fault_addr: int
         if re.search(r'\b' + reg + r'\b', operand):
             return reg
     return None
+
 
 
 def _read_mem(raw: bytes, memory_map: list, addr: int, size: int) -> "bytes | None":
@@ -1960,7 +1970,7 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
     """Reconstruct the crash thread's call chain.
 
     Uses PE .pdata RUNTIME_FUNCTION entries (x64 exception directory) to
-    validate candidate return addresses found on the stack — only addresses
+    validate candidate return addresses found on the stack - only addresses
     that land inside a real function body (per .pdata) are accepted.
     For modules where .pdata is unavailable in the dump, falls back to the
     heuristic "any address in the module" approach used previously.
@@ -2210,10 +2220,10 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                 })
             elif is_vtable_dispatch and fault_addr == 0 and crash_rcx == 0:
                 findings.append({"conf": "HIGH",
-                    "title": f"Virtual method called on null 'this' pointer — vtable dispatch crashed",
+                    "title": f"Virtual method called on null 'this' pointer - vtable dispatch crashed",
                     "detail": (
                         f"The crash instruction is MOV RAX, [RCX] followed by CALL [RAX+0x{ib[5]:02X}] "
-                        f"— the standard x64 C++ virtual dispatch sequence. "
+                        f"- the standard x64 C++ virtual dispatch sequence. "
                         f"RCX ('this' pointer) was 0x0 at crash time, so loading the vtable from [RCX] "
                         f"faulted immediately. Virtual function at vtable slot {vtable_slot} "
                         f"(offset +0x{ib[5]:02X}) was the intended target. "
@@ -2279,9 +2289,9 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         this_null = rcx < 0x1000
         findings.append({"conf": "MED" if not this_null else "HIGH",
             "title": f"Active game thread in {mod} +0x{off:X}",
-            "detail": (f"This thread was executing game code when the crash occurred — "
+            "detail": (f"This thread was executing game code when the crash occurred - "
                        f"it is the most likely location of the root cause. "
-                       + (f"RCX (likely 'this' pointer) = 0x{rcx:016X} — near zero, "
+                       + (f"RCX (likely 'this' pointer) = 0x{rcx:016X} - near zero, "
                           f"suggesting a virtual call on a null/destroyed object. "
                           if this_null else
                           f"RCX=0x{rcx:016X}  RDX=0x{rdx:016X}  RAX=0x{rax:016X}. ")
@@ -2297,11 +2307,11 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         bad_reg = _identify_bad_register(_pre_decoded, null_regs, fault_addr) if _pre_decoded else None
         if len(null_regs) == 1:
             reg, val = next(iter(null_regs.items()))
-            confirmed_str = (" This matches the base register in the crash instruction — "
+            confirmed_str = (" This matches the base register in the crash instruction - "
                             f"confirmed: {bad_reg} was the null pointer." if bad_reg and bad_reg == reg else "")
             findings.append({"conf": "HIGH",
                 "title": f"Register {reg} was null at crash time (ExceptionStream confirmed)",
-                "detail": (f"{reg} = 0x{val:016X} — captured at the exact CPU state of the fault "
+                "detail": (f"{reg} = 0x{val:016X} - captured at the exact CPU state of the fault "
                            f"before any exception handler ran.{confirmed_str} "
                            f"{reg} held a null pointer that was dereferenced or called."),
                 "link": None,
@@ -2320,7 +2330,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         else:
             reg_list = ", ".join(list(null_regs.keys())[:6]) + (f" +{len(null_regs)-6} more" if len(null_regs) > 6 else "")
             findings.append({"conf": "MED",
-                "title": f"{len(null_regs)} GPRs were null at crash — likely uninitialized or zeroed memory",
+                "title": f"{len(null_regs)} GPRs were null at crash - likely uninitialized or zeroed memory",
                 "detail": (f"Null registers: {reg_list}. "
                            f"Having this many zero registers at fault time suggests the code was "
                            f"executing in a freshly-zeroed or corrupted stack/heap frame. "
@@ -2333,7 +2343,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         nr_list = ", ".join(f"{r}=0x{v:X}" for r, v in near_nulls.items())
         findings.append({"conf": "LOW",
             "title": f"Near-null registers: {nr_list}",
-            "detail": ("These registers held small non-zero values — "
+            "detail": ("These registers held small non-zero values - "
                        "they may be array indices, loop counters, or enum values "
                        "rather than null pointers. Low signal on their own."),
             "link": None,
@@ -2354,7 +2364,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                        f".pdata available for {pdata_mods}/{total_mods} engine modules)")
             conf = "MED"
         else:
-            quality = "heuristic only — .pdata not available in this dump, frames may include noise"
+            quality = "heuristic only - .pdata not available in this dump, frames may include noise"
             conf = "LOW"
 
         chain_lines = []
@@ -2365,13 +2375,12 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             chain_lines.append(f"{prefix}0x{addr:016X}  {mod} +0x{off:X}{vtag}")
 
         findings.append({"conf": conf,
-            "title": f"Crash thread call chain ({len(chain)} engine frames — {quality})",
+            "title": f"Crash thread call chain ({len(chain)} engine frames - {quality})",
             "detail": ("Stack walk from crash-time RSP (ExceptionStream ground truth). "
                        "Frames marked [pdata✓] are validated against the PE exception directory "
-                       "and are real return addresses. Frames marked [heuristic] are unverified — "
+                       "and are real return addresses. Frames marked [heuristic] are unverified - "
                        "treat them as candidates, not certainties. "
-                       "Without PDB symbols, addresses are raw offsets. "
-                       "Use WinDbg + PDBs to resolve function names.\n"
+                       "Addresses are shown as module + hex offset - share this dump with the development team for full analysis.\n"
                        + "\n".join(chain_lines)),
             "link": None,
         })
@@ -2393,7 +2402,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                         "  <- RCX null (null object)" if t["rcx"] < 0x1000 else "")
                 )
             findings.append({"conf": "MED",
-                "title": f"Engine suicide — {len(active_game)} game thread(s) active at trigger time",
+                "title": f"Engine suicide - {len(active_game)} game thread(s) active at trigger time",
                 "detail": ("These threads were executing game code when the suicide instruction fired. "
                            "One of them most likely caused the engine to detect an internal error "
                            "and call its crash routine. Check the .log for which assertion/check failed. "
@@ -2405,7 +2414,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         if ex_code == 0xC0000142:
             dll_suspect = _find_dll_init_suspect(parsed)
             findings.insert(0, {"conf": "HIGH",
-                "title": "DLL Initialisation Failed — game crashed before main()",
+                "title": "DLL Initialisation Failed - game crashed before main()",
                 "detail": (
                     "Exception 0xC0000142 (DLL_INIT_FAILED) means a DLL's DllMain returned FALSE "
                     "or threw an exception during process startup. The game executable never ran. "
@@ -2485,7 +2494,7 @@ def build_summary(parsed: dict) -> str:
         regs = ex.get("regs", {})
         if regs:
             lines.append("")
-            lines.append("── REGISTERS AT CRASH (ExceptionStream — ground truth) ─")
+            lines.append("── REGISTERS AT CRASH (ExceptionStream - ground truth) ─")
             null_regs = {k: v for k, v in regs.items() if v == 0}
             near_null = {k: v for k, v in regs.items() if 0 < v < 0x1000}
             for name, val in regs.items():
@@ -2723,7 +2732,7 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             "instruction": f"MOV {dst_reg}, {operand}",
             "explanation": (
                 f"Read through {operand}. "
-                f"The base address ({base_str}) was null or near-null at crash time — "
+                f"The base address ({base_str}) was null or near-null at crash time - "
                 f"the object pointer was null, already freed, or never initialised."
             ),
             "confidence": "HIGH",
@@ -2768,7 +2777,7 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
                 "instruction": "MOV [0x00000000], imm32",
                 "explanation": (
                     "The engine explicitly wrote to absolute address 0x0 using MOV [imm32], imm32. "
-                    "The destination is hardcoded as null — this is an intentional Stingray engine suicide."
+                    "The destination is hardcoded as null - this is an intentional Stingray engine suicide."
                 ),
                 "confidence": "HIGH",
             }
@@ -2790,7 +2799,7 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             "instruction": f"MOV {operand}, imm32",
             "explanation": (
                 f"Immediate value written to {operand}. "
-                f"If {pfx}{base_str} was null at crash time this is a null pointer write — "
+                f"If {pfx}{base_str} was null at crash time this is a null pointer write - "
                 f"a struct member assignment on a null or destroyed object."
             ),
             "confidence": "HIGH",
@@ -2852,7 +2861,7 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
                 else:
                     mem_op = f"[{pfx}{base_str}+...]"
                 instr = f"{mnemonic} {mem_op}, {xmm_reg}" if is_store else f"{mnemonic} {xmm_reg}, {mem_op}"
-                align_note = " MOVAPS requires 16-byte alignment — misalignment also causes this crash." if "MOVAPS" in mnemonic else ""
+                align_note = " MOVAPS requires 16-byte alignment - misalignment also causes this crash." if "MOVAPS" in mnemonic else ""
                 return {
                     "is_suicide": False,
                     "instruction": instr,
@@ -2904,30 +2913,99 @@ def detect_mods(parsed: dict) -> dict:
     indicators = []
 
     game_root = None
+    game_drive = "c:"
     for m in modules:
         name = m["name"]
         nl   = name.lower().replace("/", "\\")
-        p    = Path(name)
-        if p.suffix.lower() == ".exe" and ("steamapps" in nl or "games" in nl or "program files" in nl):
-            parts = p.parts
-            for j, part in enumerate(parts):
-                if part.lower() in ("bin", "binaries", "win64", "win32", "x64"):
-                    game_root = "\\".join(parts[:j]).lower()
-                    break
-            if game_root:
+        p = PureWindowsPath(name)
+        if p.suffix.lower() != ".exe":
+            continue
+        parts = p.parts
+        if len(parts) < 2:
+            continue
+        game_drive = parts[0].lower().rstrip("\\")
+        for j, part in enumerate(parts):
+            if part.lower() in ("bin", "binaries", "win64", "win32", "x64", "shipping"):
+                game_root = str(PureWindowsPath(*parts[:j])).lower()
                 break
+        if not game_root:
+            game_root = str(p.parent).lower()
+        break
 
     SAFE_PREFIXES = [
-        "c:\\windows\\",
-        "c:\\program files (x86)\\steam\\",
-        "c:\\program files\\steam\\",
-        "c:\\program files\\windows",
-        "c:\\programdata\\",
+        "\\windows\\",
+        "\\programdata\\",
+        "\\program files (x86)\\steam\\",
+        "\\program files\\steam\\",
+        "\\steamapps\\",
+        "\\program files\\nvidia corporation\\",
+        "\\program files (x86)\\nvidia corporation\\",
+        "\\programdata\\nvidia\\",
+        "\\programdata\\nvidia corporation\\",
+        "\\program files\\amd\\",
+        "\\program files (x86)\\amd\\",
+        "\\program files\\intel\\",
+        "\\program files (x86)\\intel\\",
+        "\\program files\\microsoft visual c++",
+        "\\program files (x86)\\microsoft visual c++",
+        "\\program files\\common files\\microsoft shared\\",
+        "\\program files (x86)\\common files\\microsoft shared\\",
+        "\\program files\\obs-studio\\",
+        "\\program files (x86)\\obs-studio\\",
+        "\\program files\\nvidia geforce experience\\",
+        "\\program files (x86)\\nvidia geforce experience\\",
+        "\\program files\\fraps\\",
+        "\\program files (x86)\\msi afterburner\\",
+        "\\program files\\msi afterburner\\",
+        "\\program files\\rivatuner statistics server\\",
+        "\\program files (x86)\\rivatuner statistics server\\",
+        "\\program files\\playnite\\",
     ]
     if game_root:
         SAFE_PREFIXES.append(game_root)
+    if game_drive and game_drive != "c:":
+        SAFE_PREFIXES.extend([
+            f"{game_drive}\\windows\\",
+            f"{game_drive}\\programdata\\",
+        ])
 
-    KNOWN_GAME_DLLS = {
+    NVIDIA_DLLS = {
+        "nvd3dumx.dll", "nvwgf2umx.dll", "nvwgf2um.dll",
+        "nvcuda.dll", "nvcuvid.dll", "nvfatbinaryloader.dll",
+        "nvoglv64.dll", "nvoglv32.dll",
+        "nvtelemetry.dll", "nvspcap64.dll", "nvspcap.dll",
+        "nvppex.dll", "nvmemmapmapstoragex.dll", "nvmessagebus.dll",
+        "nvgpucomp64.dll", "nvldumdx.dll",
+        "nvgamefeatures.dll", "nvshadowplay.dll",
+        "nvsmartmaxapp.dll", "nvcpl.dll",
+        "nvngx.dll", "nvngx_dlss.dll", "nvngx_dlssg.dll",
+        "nvngx_dlssd.dll", "sl.common.dll", "sl.dlss.dll",
+        "sl.dlss_g.dll", "sl.reflex.dll", "sl.nis.dll",
+        "nvapi64.dll", "nvapi.dll",
+        "nvsdk_ngx_s.dll", "nvlatencysdk.dll",
+        "gfe3.dll", "nggamefeatures.dll",
+    }
+    AMD_DLLS = {
+        "amd_ags_x64.dll", "amd_ags_x86.dll",
+        "amdvulkan64.dll", "amdvulkan32.dll",
+        "amfrt64.dll", "amfrt32.dll",
+        "amd_fidelityfx_upscaler_dx12.dll", "amd_fidelityfx_upscaler_dx11.dll",
+        "amdpsp.dll", "atiuxpag.dll",
+    }
+    INTEL_DLLS = {
+        "igdumdim64.dll", "igdumdim32.dll",
+        "intc_app_api.dll", "intcigs.dll",
+        "libxess.dll", "xess.dll",
+    }
+    SYSTEM_CAPTURE_DLLS = {
+        "graphics-hook64.dll", "graphics-hook32.dll",
+        "obsover64.dll", "obsover32.dll",
+        "rtsshooks64.dll", "rtsshooks.dll",
+        "gamebarftics.dll", "gamebarpresencewriter.dll",
+    }
+
+    KNOWN_GAME_DLLS = (
+        NVIDIA_DLLS | AMD_DLLS | INTEL_DLLS | SYSTEM_CAPTURE_DLLS | {
         "lua51.dll", "game.dll",
         "steam_api64.dll", "steam_api.dll", "gameoverlayrenderer64.dll",
         "steamclient64.dll", "vstdlib_s64.dll", "tier0_s64.dll",
@@ -2940,36 +3018,25 @@ def detect_mods(parsed: dict) -> dict:
         "npggnt64.des", "npsc64.des",
         "wwise_pluginw64_release.dll", "wwise_pluginw64_debug.dll",
         "auroheadphone_w64r.dll", "akorthographicverb_w64r.dll",
-        "fmodstudio64.dll", "fmodstudioL64.dll", "fmod64.dll", "fmodL64.dll",
+        "fmodstudio64.dll", "fmodstudiol64.dll", "fmod64.dll", "fmodl64.dll",
         "physxdevice64.dll", "physx3_x64.dll", "physx3common_x64.dll",
         "nvphysxgpu64.dll",
         "level_generation_pluginw64_release.dll",
         "level_generation_pluginw64_debug.dll",
         "easyanticheat.dll", "easyanticheat_launcher.dll",
         "dxcompiler.dll", "dxil.dll", "d3d12core.dll",
-        "nvapi64.dll", "amd_ags_x64.dll",
-        "winpixeventruntime.dll",
-        "xaudio2_9.dll", "xaudio2_8.dll", "x3daudio1_7.dll",
+        "xaudio2_9.dll", "xaudio2_8.dll", "xaudio2_7.dll", "x3daudio1_7.dll",
         "mfplat.dll", "mfreadwrite.dll",
         "concrt140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
         "vcruntime140_1.dll",
-        "playfabmultiplayerwin.dll", "partywin.dll",
-        "amd_fidelityfx_upscaler_dx12.dll",
-        "amd_fidelityfx_upscaler_dx11.dll",
-        "libxess.dll",
-        "nvspcap64.dll", "nvspcap.dll",
-        "nvgpucomp64.dll",
-        "nvldumdx.dll",
-        "nvppex.dll",
-        "nvmemmapmapstoragex.dll",
-        "nvmessagebus.dll",
-        "d3d11on12.dll",
-        "dxilconv.dll",
-        "d3dscache.dll",
-        "dxcore.dll",
+        "d3d11on12.dll", "dxilconv.dll", "d3dscache.dll", "dxcore.dll",
         "msvcr110.dll", "msvcr120.dll", "msvcr100.dll",
-        "xaudio2_7.dll", "xaudio2_8.dll",
-    }
+        "sentry.dll", "backtrace.dll", "crashpad_handler.exe",
+        "battleye.dll", "bedaisy.sys",
+        "discord_game_sdk.dll", "discordrpc.dll",
+        "vivoxsdk.dll", "ortp.dll",
+        "telemetry2_x64.dll", "rad_telemetry.dll",
+    })
 
     MOD_MANAGER_PATHS = {
         "vortex":           "Vortex mod manager",
@@ -2993,33 +3060,38 @@ def detect_mods(parsed: dict) -> dict:
     }
 
     PROXY_SYSTEM_DLLS: dict[str, str] = {
-        "dxgi.dll":       "DXGI proxy — likely ReShade or another D3D post-process hook",
-        "d3d12.dll":      "D3D12 proxy — likely ReShade or a D3D12 hook",
-        "d3d11.dll":      "D3D11 proxy — likely ReShade or a D3D11 hook",
-        "d3d10.dll":      "D3D10 proxy — likely ReShade or a D3D10 hook",
-        "d3d9.dll":       "D3D9 proxy — likely ReShade, ENB, or a D3D9 hook",
-        "opengl32.dll":   "OpenGL proxy — likely an OpenGL hook or injector",
-        "dinput8.dll":    "DInput8 proxy — classic mod injection vector",
-        "dinput.dll":     "DInput proxy — classic mod injection vector",
-        "winmm.dll":      "WinMM proxy — common mod injection vector (used by many mod loaders)",
-        "version.dll":    "Version proxy — common lightweight mod injection vector",
-        "wsock32.dll":    "WinSock proxy — network hook (uncommon in games, suspicious)",
-        "xinput1_3.dll":  "XInput 1.3 proxy — controller hook or mod injection vector",
-        "xinput1_4.dll":  "XInput 1.4 proxy — controller hook or mod injection vector",
-        "dsound.dll":     "DirectSound proxy — audio hook or legacy mod injection",
+        "dxgi.dll":       "DXGI proxy - likely ReShade or another D3D post-process hook",
+        "d3d12.dll":      "D3D12 proxy - likely ReShade or a D3D12 hook",
+        "d3d11.dll":      "D3D11 proxy - likely ReShade or a D3D11 hook",
+        "d3d10.dll":      "D3D10 proxy - likely ReShade or a D3D10 hook",
+        "d3d9.dll":       "D3D9 proxy - likely ReShade, ENB, or a D3D9 hook",
+        "opengl32.dll":   "OpenGL proxy - likely an OpenGL hook or injector",
+        "dinput8.dll":    "DInput8 proxy - classic mod injection vector",
+        "dinput.dll":     "DInput proxy - classic mod injection vector",
+        "winmm.dll":      "WinMM proxy - common mod injection vector (used by many mod loaders)",
+        "version.dll":    "Version proxy - common lightweight mod injection vector",
+        "wsock32.dll":    "WinSock proxy - network hook (uncommon in games, suspicious)",
+        "xinput1_3.dll":  "XInput 1.3 proxy - controller hook or mod injection vector",
+        "xinput1_4.dll":  "XInput 1.4 proxy - controller hook or mod injection vector",
+        "dsound.dll":     "DirectSound proxy - audio hook or legacy mod injection",
     }
 
     for m in modules:
         name  = m["name"]
         nl    = name.lower().replace("/", "\\")
-        sn    = Path(name).name
+        sn    = PureWindowsPath(name).name
         snl   = sn.lower()
 
-        is_safe = any(nl.startswith(p) for p in SAFE_PREFIXES)
+        is_safe = any(
+            (p.startswith("\\") and p in nl) or
+            nl.startswith(p)
+            for p in SAFE_PREFIXES
+        )
         is_known_dll = snl in {k.lower() for k in KNOWN_GAME_DLLS}
         is_plugin = "\\plugins\\" in nl
 
-        if not is_safe and not is_known_dll and not is_plugin:
+        is_exe = PureWindowsPath(name).suffix.lower() == ".exe"
+        if not is_safe and not is_known_dll and not is_plugin and not is_exe:
             indicators.append({
                 "type":   "unknown_dll",
                 "path":   name,
@@ -3034,7 +3106,7 @@ def detect_mods(parsed: dict) -> dict:
                 indicators.append({
                     "type":   "proxy_dll",
                     "path":   name,
-                    "detail": f"Proxy DLL in game folder: {_proxy_name} — {PROXY_SYSTEM_DLLS[_proxy_name]}",
+                    "detail": f"Proxy DLL in game folder: {_proxy_name} - {PROXY_SYSTEM_DLLS[_proxy_name]}",
                 })
 
         for sig, label in MOD_MANAGER_PATHS.items():
@@ -3144,8 +3216,6 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
     crash_mod  = mod_for_addr(ex_addr) or ""
     is_suicide = bool(decoded_instr and decoded_instr.get("is_suicide"))
 
-    # active_mods: list of (mod_name_lower, frame_depth) for all non-system non-handler
-    # frames across all active threads. frame_depth=0 means the thread's RIP itself.
     active_mods = []
     for t in threads:
         rip = t.get("rip", 0)
@@ -3155,7 +3225,6 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             fl   = full.lower().replace("/", "\\")
             if "\\windows\\" not in fl and mod.lower() not in CRASH_HANDLERS:
                 active_mods.append((mod.lower(), 0))
-        # Also include stack frames from walk_stack
         rsp = t.get("rsp", 0)
         if rsp:
             for depth, (addr, smod, soff) in enumerate(walk_stack(parsed, rsp, max_frames=8), start=1):
@@ -3179,7 +3248,6 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             if "crash_mod_contains" in m:
                 if m["crash_mod_contains"].lower() not in crash_mod.lower(): continue
             if "stack_contains" in m:
-                # Optional: stack_contains_depth limits match to top N frames (default: any depth)
                 kw         = m["stack_contains"].lower()
                 max_depth  = int(m.get("stack_contains_depth", 9999))
                 if not any(kw in mod and depth <= max_depth for mod, depth in active_mods): continue
@@ -3537,7 +3605,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             "player_message": (
                 f"The crash happened inside {_pname} which is in your game folder "
                 f"instead of Windows\\System32. This is a ReShade, ENB, or other D3D hook. "
-                f"The hook itself crashed — this is not a game bug."
+                f"The hook itself crashed - this is not a game bug."
             ),
             "fix": [
                 f"Remove {_pname} from the game folder and test without it",
@@ -3547,7 +3615,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             ],
             "dev_note": (
                 f"Crash addr inside {_pname} loaded from game folder (proxy/hook DLL). "
-                f"Not engine code — report to ReShade/ENB developers."
+                f"Not engine code - report to ReShade/ENB developers."
             ),
             "confidence": "HIGH",
         })
@@ -3621,7 +3689,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             ],
             "dev_note": (
                 f"Proxy DLL(s) in game folder: {proxy_names}. "
-                "These replace system DLLs and hook D3D/input — high confidence this "
+                "These replace system DLLs and hook D3D/input - high confidence this "
                 "contributed to the crash. Not a vanilla crash."
             ),
             "confidence": "HIGH",
@@ -3742,10 +3810,10 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             "name": "Pure virtual function call (C++ object destroyed too early)",
             "player_message": (
                 "The game tried to call a function on an object that was already destroyed. "
-                "This is a game bug — a C++ object was used after its lifetime ended."
+                "This is a game bug - a C++ object was used after its lifetime ended."
             ),
             "fix": [
-                "This is a game bug — please report it with the dump file",
+                "This is a game bug - please report it with the dump file",
                 "Note what you were doing when it crashed (especially rapid state changes)",
                 "Check if it happens consistently",
             ],
@@ -3760,21 +3828,21 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             and not is_suicide):
         return _builtin("NULL_DEREF_READ", {
             "id":   "NULL_DEREF_READ",
-            "name": "Null pointer read — object was null or already destroyed",
+            "name": "Null pointer read - object was null or already destroyed",
             "player_message": (
                 "The game tried to read from a null pointer. "
-                "This means an object that was expected to exist was null — "
+                "This means an object that was expected to exist was null - "
                 "it was never created, already destroyed, or a function returned null "
                 "and the caller didn't check before using it."
             ),
             "fix": [
-                "This is a game bug — please report it with the dump file",
+                "This is a game bug - please report it with the dump file",
                 "Share both the .dmp and the .log file with the 418th",
                 "Note exactly what you were doing when it crashed",
                 "Check if it happens consistently or randomly",
             ],
             "dev_note": (
-                "AV read from 0x0 — the base pointer itself was null (not a field offset). "
+                "AV read from 0x0 - the base pointer itself was null (not a field offset). "
                 "Instruction is typically MOV reg, [RCX] or similar. "
                 "Check the active game thread for what passed the null pointer."
             ),
@@ -3787,14 +3855,14 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             and not is_suicide):
         return _builtin("NULL_DEREF_WRITE", {
             "id":   "NULL_DEREF_WRITE",
-            "name": "Null pointer write — destroyed or uninitialised object",
+            "name": "Null pointer write - destroyed or uninitialised object",
             "player_message": (
                 "The game tried to write to memory through a null or invalid pointer. "
-                "This is a game bug — an object was used after being destroyed, "
+                "This is a game bug - an object was used after being destroyed, "
                 "or was never properly initialised."
             ),
             "fix": [
-                "This is a game bug — please report it with the dump file",
+                "This is a game bug - please report it with the dump file",
                 "Share both the .dmp and the .log file",
                 "Note exactly what you were doing when it crashed",
             ],
@@ -3825,11 +3893,11 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                 "Update both your NVIDIA and Intel GPU drivers",
                 "In Windows Display Settings, set the NVIDIA card as the primary GPU",
                 "If on a laptop, disable the Intel iGPU in Device Manager and test",
-                "Update your NVIDIA drivers — use DDU for a clean install if issues persist",
+                "Update your NVIDIA drivers - use DDU for a clean install if issues persist",
             ],
             "dev_note": (
                 "Crash in GPU driver DLL on dual-GPU system (NVIDIA + Intel iGPU both loaded). "
-                "Check which adapter D3D12 is selecting at runtime — possible iGPU fallback."
+                "Check which adapter D3D12 is selecting at runtime - possible iGPU fallback."
             ),
             "confidence": "HIGH",
         })
@@ -3849,7 +3917,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                     "Check your internet connection stability",
                     "Try a wired connection instead of Wi-Fi",
                     "Check the game log for network error messages",
-                    "Try again — intermittent network issues often resolve themselves",
+                    "Try again - intermittent network issues often resolve themselves",
                 ],
                 "dev_note": "Engine suicide with network DLL on active stack - packet error or RPC on dead object",
                 "confidence": "MED",
@@ -4024,7 +4092,9 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         "pattern":           pattern,
     }
 
-class CrashAnalyzer(tk.Tk):
+_BaseWindow = TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk
+
+class CrashAnalyzer(_BaseWindow):
     def __init__(self):
         super().__init__()
         self.title("Stingray Crash Analyzer")
@@ -4142,7 +4212,7 @@ class CrashAnalyzer(tk.Tk):
         self._drop_zone.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._build_drop_zone()
 
-        self._status_var = tk.StringVar(value="Ready — drop a .dmp file to begin")
+        self._status_var = tk.StringVar(value="Ready - drop a .dmp file to begin")
         status = tk.Frame(self, bg=BG2, pady=0)
         status.pack(fill="x", side="bottom")
         tk.Frame(status, bg=BORDER, height=1).pack(fill="x")
@@ -4164,10 +4234,11 @@ class CrashAnalyzer(tk.Tk):
         return f
 
 
+
     def _open_debugger(self, event=None):
         """Launch the internal feature-test debugger."""
         win = tk.Toplevel(self)
-        win.title("Internal Debugger — Feature Test")
+        win.title("Internal Debugger - Feature Test")
         win.geometry("960x680")
         win.configure(bg=BG)
         try:
@@ -4181,7 +4252,7 @@ class CrashAnalyzer(tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text="Internal Feature Debugger",
                  bg=BG2, fg=ACCENT, font=(UI_FONT, 12, "bold")).pack(side="left")
-        tk.Label(hdr, text="  Ctrl+F8  —  tests every analysis pipeline function with synthetic data",
+        tk.Label(hdr, text="  Ctrl+F8  -  tests every analysis pipeline function with synthetic data",
                  bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(side="left")
         tk.Frame(win, bg=ACCENT, height=2).pack(fill="x")
 
@@ -4420,7 +4491,7 @@ class CrashAnalyzer(tk.Tk):
         import traceback, time
 
         emit("=" * 70, "head")
-        emit(f"  STINGRAY CRASH ANALYZER — FEATURE TEST", "head")
+        emit(f"  STINGRAY CRASH ANALYZER - FEATURE TEST", "head")
         emit(f"  Scenario: {scenario}", "head")
         emit("=" * 70, "head")
         emit("")
@@ -4453,13 +4524,13 @@ class CrashAnalyzer(tk.Tk):
                 note = ""
                 if expected is not None and value != expected:
                     ok = False
-                    note = f" — expected {expected!r}, got {value!r}"
+                    note = f" - expected {expected!r}, got {value!r}"
                 if contains is not None and (value is None or contains not in str(value)):
                     ok = False
-                    note = f" — expected to contain {contains!r}"
+                    note = f" - expected to contain {contains!r}"
                 if min_len is not None and (value is None or len(value) < min_len):
                     ok = False
-                    note = f" — expected len >= {min_len}, got {len(value) if value else 0}"
+                    note = f" - expected len >= {min_len}, got {len(value) if value else 0}"
                 if ok:
                     emit(f"  ✔  {label}", "ok")
                     passed += 1
@@ -4467,13 +4538,13 @@ class CrashAnalyzer(tk.Tk):
                     emit(f"  ✖  {label}{note}", "fail")
                     failed += 1
             except Exception as e:
-                emit(f"  ✖  {label}  — {e}", "fail")
+                emit(f"  ✖  {label}  - {e}", "fail")
                 failed += 1
 
         emit("[ 1 ]  Synthetic Data", "head")
         parsed = check("Build synthetic parsed dict", self._make_synthetic_parsed, scenario)
         if parsed is None:
-            emit("\nCannot continue — synthetic data construction failed.", "fail")
+            emit("\nCannot continue - synthetic data construction failed.", "fail")
             return
         check_val("parsed has modules",   parsed.get("modules"),   min_len=5)
         check_val("parsed has exception", parsed.get("exception"), min_len=1)
@@ -4518,7 +4589,7 @@ class CrashAnalyzer(tk.Tk):
 
         chain = check("_reconstruct_call_chain()", _reconstruct_call_chain, parsed, 12)
         emit(f"  ·  Chain frames: {len(chain) if chain is not None else 0} "
-             f"(0 expected — no memory map in synthetic mode)", "dim")
+             f"(0 expected - no memory map in synthetic mode)", "dim")
 
         unwind = parsed.get("_stack_unwind", {})
         emit(f"  ·  pdata modules: {unwind.get('pdata_modules', 0)} / "
@@ -4599,13 +4670,13 @@ class CrashAnalyzer(tk.Tk):
             for ind in mods.get("indicators", []):
                 sev = ind.get("severity", "?")
                 tag = "fail" if sev == "HIGH" else ("warn" if sev == "MED" else "dim")
-                emit(f"  ·  [{sev:4}] {ind.get('type','?')} — {ind.get('detail','')}", tag)
+                emit(f"  ·  [{sev:4}] {ind.get('type','?')} - {ind.get('detail','')}", tag)
             check_val("no workshop_mod indicators",
                       not any(i.get("type") == "workshop_mod"
                               for i in mods.get("indicators", [])),
                       expected=True)
             if scenario == "mod_detected":
-                check_val("mod detected — has_mods is True", mods.get("has_mods"), expected=True)
+                check_val("mod detected - has_mods is True", mods.get("has_mods"), expected=True)
                 check_val("at least one indicator present",
                           len(mods.get("indicators", [])), min_len=1)
         emit("")
@@ -4657,7 +4728,7 @@ class CrashAnalyzer(tk.Tk):
         if failed == 0:
             emit("  All tests passed.", "ok")
         else:
-            emit(f"  {failed} test(s) failed — see above for details.", "fail")
+            emit(f"  {failed} test(s) failed - see above for details.", "fail")
         emit("─" * 70, "dim")
 
     def _debugger_apply(self, scenario: str):
@@ -4691,12 +4762,39 @@ class CrashAnalyzer(tk.Tk):
         centre = tk.Frame(dz, bg=BG)
         centre.pack()
 
-        icon_frame = tk.Frame(centre, bg=BG2, width=120, height=120,
-                              highlightthickness=2, highlightbackground=BORDER)
-        icon_frame.pack(pady=(0, 24))
+        icon_frame = tk.Frame(centre, bg=BG, width=128, height=128)
+        icon_frame.pack(pady=(0, 20))
         icon_frame.pack_propagate(False)
-        tk.Label(icon_frame, text="💥", bg=BG2,
-                 font=("Segoe UI Emoji", 40)).place(relx=0.5, rely=0.5, anchor="center")
+        _icon_loaded = False
+        try:
+            from PIL import Image, ImageTk
+            _ico_path = Path(__file__).parent / "assets" / "icon.ico"
+            if _ico_path.exists():
+                pil_img = Image.open(str(_ico_path))
+                if hasattr(pil_img, "n_frames"):
+                    sizes = []
+                    for frame in range(pil_img.n_frames):
+                        pil_img.seek(frame)
+                        sizes.append(pil_img.size)
+                    best = max(sizes, key=lambda s: s[0])
+                    pil_img.seek(sizes.index(best))
+                pil_img = pil_img.convert("RGBA")
+                pil_img = pil_img.resize((96, 96), Image.LANCZOS)
+                _img = ImageTk.PhotoImage(pil_img)
+                lbl = tk.Label(icon_frame, image=_img, bg=BG)
+                lbl.image = _img
+                lbl.place(relx=0.5, rely=0.5, anchor="center")
+                self._dz_icon_ref = _img
+                _icon_loaded = True
+        except Exception:
+            pass
+
+        if not _icon_loaded:
+            badge = tk.Frame(icon_frame, bg=ACCENT, width=96, height=96)
+            badge.place(relx=0.5, rely=0.5, anchor="center")
+            badge.pack_propagate(False)
+            tk.Label(badge, text="SCA", bg=ACCENT, fg="white",
+                     font=(UI_FONT, 28, "bold")).place(relx=0.5, rely=0.5, anchor="center")
 
         tk.Label(centre, text="Stingray Crash Analyzer",
                  bg=BG, fg=TEXT, font=(UI_FONT, 20, "bold")).pack()
@@ -4720,24 +4818,33 @@ class CrashAnalyzer(tk.Tk):
                   relief="flat", padx=20, pady=6,
                   font=(UI_FONT, 9, "bold"), cursor="hand2").pack()
 
-        def _on_drop(event):
-            path = event.data if hasattr(event, "data") else ""
-            if not path:
-                return
-            path = path.strip().strip("{}")
-            if path.lower().endswith((".dmp", ".mdmp")):
-                self._load_path(path)
+        if _DND_AVAILABLE:
+            def _on_drop(event):
+                raw = event.data
+                paths = self.tk.splitlist(raw)
+                for p in paths:
+                    if p.lower().endswith((".dmp", ".mdmp")):
+                        self._load_path(p)
+                        break
 
-        def _try_register_dnd():
             try:
-                dz.drop_target_register("DND_Files")
-                dz.dnd_bind("<<Drop>>", _on_drop)
-                drop_box.drop_target_register("DND_Files")
-                drop_box.dnd_bind("<<Drop>>", _on_drop)
+                self.drop_target_register(DND_FILES)
+                self.dnd_bind("<<Drop>>", _on_drop)
+                self._dnd_active = True
+            except Exception as e:
+                self._dnd_active = False
+                try:
+                    self._status(f"Drag-and-drop unavailable ({type(e).__name__}: {e}) - use Browse instead",
+                                 busy=False)
+                except Exception:
+                    pass
+        else:
+            self._dnd_active = False
+            try:
+                self._status("Drag-and-drop unavailable (tkinterdnd2 not installed) - use Browse instead",
+                             busy=False)
             except Exception:
                 pass
-
-        self.after(100, _try_register_dnd)
 
         tk.Frame(dz, bg=BG).pack(expand=True, fill="both")
 
@@ -4775,7 +4882,7 @@ class CrashAnalyzer(tk.Tk):
         self._load_path(path)
 
     def _load_path(self, path: str):
-        """Central entry point for loading a dump — called by browse and drag-drop."""
+        """Central entry point for loading a dump - called by browse and drag-drop."""
         self._file_var.set(path)
         self._file_bar.pack(fill="x", after=self.winfo_children()[1])
         self._drop_zone.place_forget()
@@ -4854,7 +4961,7 @@ class CrashAnalyzer(tk.Tk):
         self._build_dllverify(dll_verify)
 
         self._open_btn.config(state="normal")
-        self._status(f"Parsed — {len(parsed.get('modules',[]))} modules · "
+        self._status(f"Parsed - {len(parsed.get('modules',[]))} modules · "
                      f"exception {parsed.get('exception',{}).get('code','none')}",
                      busy=False)
         self._nb.select(0)
@@ -4983,7 +5090,7 @@ class CrashAnalyzer(tk.Tk):
             ("vcruntime140.dll",   "VCRUNTIME140.dll  (Visual C++ 2015-2022 C Runtime)"),
             ("vcruntime140_1.dll", "VCRUNTIME140_1.dll  (Visual C++ 2019-2022 Extended C Runtime)"),
             ("concrt140.dll",      "CONCRT140.dll  (Visual C++ 2015-2022 Concurrency Runtime)"),
-            ("ucrtbase.dll",       "ucrtbase.dll  (Windows Universal C Runtime — in-box Windows component)"),
+            ("ucrtbase.dll",       "ucrtbase.dll  (Windows Universal C Runtime - in-box Windows component)"),
         ]
         for dll_key, section_label in RUNTIME_ORDER:
             result = runtime.get(dll_key)
@@ -4996,16 +5103,16 @@ class CrashAnalyzer(tk.Tk):
                 absent_card = tk.Frame(inner, bg=BG2, padx=16, pady=6)
                 absent_card.pack(fill="x", padx=12, pady=2)
                 absent_note = {
-                    "vcruntime140.dll":   "Not found — may indicate a VS2013-or-older game, "
+                    "vcruntime140.dll":   "Not found - may indicate a VS2013-or-older game, "
                                           "or the DLL was statically linked.",
-                    "vcruntime140_1.dll": "Not found — normal for VS2017/VS2015 games. "
+                    "vcruntime140_1.dll": "Not found - normal for VS2017/VS2015 games. "
                                           "Only present when compiled with VS2019+ C++20 features.",
-                    "concrt140.dll":      "Not found — normal. Only loaded if the game uses "
+                    "concrt140.dll":      "Not found - normal. Only loaded if the game uses "
                                           "the Parallel Patterns Library (PPL) or async tasks.",
-                    "ucrtbase.dll":       "Not found in module list — may have been loaded "
+                    "ucrtbase.dll":       "Not found in module list - may have been loaded "
                                           "implicitly via delay-load or the dump truncated module entries.",
                 }.get(dll_key, "Not present in module list.")
-                tk.Label(absent_card, text=f"[--] NOT IN DUMP  —  {absent_note}",
+                tk.Label(absent_card, text=f"[--] NOT IN DUMP  -  {absent_note}",
                          bg=BG2, fg=TEXT_DIM, font=("Consolas", 8),
                          wraplength=800, justify="left", anchor="w").pack(anchor="w")
 
@@ -5036,7 +5143,7 @@ class CrashAnalyzer(tk.Tk):
               "A zero checksum means the file was modified or built by a third-party tool.",
             "PE timestamp   - Is the DLL timestamp within a valid date range for this DLL? "
               "Timestamps predating the DLL's existence are flagged. NOTE: future-looking "
-              "timestamps alone (e.g. 2056-12-30) are NOT flagged — Microsoft uses "
+              "timestamps alone (e.g. 2056-12-30) are NOT flagged - Microsoft uses "
               "Reproducible Builds from VS2017+ which store a content hash in the timestamp "
               "field, producing dates far in the future. This is legitimate. Only a future "
               "timestamp combined with a zeroed checksum indicates tampering.",
@@ -5572,7 +5679,7 @@ class CrashAnalyzer(tk.Tk):
         windbg_cmds = [
             ("1. Open the dump in WinDbg",
              f'.opendump "{dmp_path}"'),
-            ("2. Set Microsoft public symbol path (no game PDBs needed for this)",
+            ("2. Set Microsoft public symbol path (resolves Windows/system DLL names only)",
              f'.sympath "srv*C:\\Symbols*https://msdl.microsoft.com/download/symbols"'),
             ("3. Reload symbols (resolves Windows/system DLL names)",
              ".reload /f"),
@@ -5582,7 +5689,7 @@ class CrashAnalyzer(tk.Tk):
              f"u {crash_addr:#x}-10 L20"),
             ("6. Show all register values at crash time",
              "r"),
-            ("7. Try to identify the function (may show only offset without PDBs)",
+            ("7. Identify the nearest symbol (Windows DLLs only - game functions will show raw offsets)",
              f"ln {crash_addr:#x}"),
             ("8. Show all threads with their top 5 frames",
              "~* kb 5"),
@@ -5591,11 +5698,10 @@ class CrashAnalyzer(tk.Tk):
         ]
 
         note_lines = [
-            "⚠  No public PDBs available for this game.",
-            "   Steps 4, 5, 7 will show raw addresses instead of function names.",
-            "   You can still see: which DLL crashed, register values, raw disassembly,",
-            "   and whether the crash address is near any known Windows symbols.",
-            "   If you have access to internal build PDBs, add their folder to step 2.",
+            "ℹ  Game symbols are not publicly available.",
+            "   Game engine frames will show as raw offsets (module + 0xADDR).",
+            "   You can still determine: which module crashed, register state,",
+            "   raw disassembly at the fault address, and Windows symbol names.",
         ]
 
         sep = tk.Frame(panel, bg=BORDER, height=1)
@@ -5767,7 +5873,7 @@ class CrashAnalyzer(tk.Tk):
             card.pack(fill="x", padx=8, pady=(8, 4))
             tk.Label(card, text="Exception", bg=BG3, fg=ACCENT2,
                      font=(UI_FONT, 8, "bold")).pack(anchor="w")
-            tk.Label(card, text=f"{exception['code']}  —  {exception['code_desc']}",
+            tk.Label(card, text=f"{exception['code']}  -  {exception['code_desc']}",
                      bg=BG3, fg=TEXT, font=(UI_FONT, 10, "bold")).pack(anchor="w", pady=(2, 0))
             tk.Label(card, text=f"Address: {exception['address']}   Thread: {exception['thread_id']}",
                      bg=BG3, fg=TEXT_DIM, font=(UI_MONO, 9)).pack(anchor="w")
