@@ -5,16 +5,16 @@ A desktop tool for analyzing `.dmp` minidump files from games built on the **Aut
 ---
 
 <!-- LATEST_RELEASE_START -->
-### Latest Release: v1.4 (2026-06-15)
+### Latest Release: v1.5 (2026-06-17)
 
-- Download: [release_release_v1.4.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.4/release_v1.4.zip)
+- Download: [release_release_v1.5.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.5/release_v1.5.zip)
 
 ### Integrity
 
-- EXE SHA256: D00990A6AE93C8CC04FD8430CCED38C7F2B7674E6992E1D943C87EE38A8F1D0D
+- EXE SHA256: 625E6EC0910359CD270AEBBFFC1B22E6CD0DC2F06D738E8BC0CCCCFF48745E01
 - crash_patterns.json SHA256: 8D9A46521C669C8012D0BC812C7318B616042A132946A90FBEF91D0AAC5F2108
-- Manifest SHA256: FCCB49ADB04E8C8671EC484730336302AE558F8281962000A4B385CCB029120F
-- ZIP SHA256: 646A9090811831D5920475CEAECF63F2F5664464668DE0EFDE0300445A9C1C04
+- Manifest SHA256: 21310CCF2577929F6C707E259792DDB1490D84AD470ADFB5142F0A3D6E7638FB
+- ZIP SHA256: 6CB3D97FC6E0A0D9CB4A7C1DF50898488E82904CDB2E568C2DADBD703FDA0A78
 <!-- LATEST_RELEASE_END -->
 
 ---
@@ -207,6 +207,7 @@ The CI workflow (`.github/workflows/build.yml`) does this automatically on every
 ## License
 
 MIT License - Developed for the hardware enthusiast and troubleshooting community.
+
 
 
 
