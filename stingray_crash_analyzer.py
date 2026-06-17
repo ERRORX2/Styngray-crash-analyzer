@@ -32,6 +32,13 @@ MONO      = "Consolas" if sys.platform == "win32" else "Courier New"
 UI_FONT   = "Segoe UI" if sys.platform == "win32" else "SF Pro Display"
 UI_MONO   = MONO
 
+def resource_path(*parts: str) -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).parent
+    return base / Path(*parts)
+
 EXCEPTION_CODES = {
     0xC0000005: "⚠ STINGRAY ENGINE SUICIDE (false flag) – Engine detected an internal error and intentionally terminated. This is NOT the root cause - look at engine logs or the call stack for the real trigger.",
     0xC000001D: "ILLEGAL_INSTRUCTION – CPU executed an invalid instruction",
@@ -4104,7 +4111,7 @@ class CrashAnalyzer(_BaseWindow):
         self.bind_all("<Control-F8>", self._open_debugger)
 
         try:
-            _icon_path = Path(__file__).parent / "assets" / "icon.ico"
+            _icon_path = resource_path("assets", "icon.ico")
             if _icon_path.exists():
                 self.iconbitmap(default=str(_icon_path))
         except Exception:
@@ -4242,7 +4249,7 @@ class CrashAnalyzer(_BaseWindow):
         win.geometry("960x680")
         win.configure(bg=BG)
         try:
-            _icon_path = Path(__file__).parent / "assets" / "icon.ico"
+            _icon_path = resource_path("assets", "icon.ico")
             if _icon_path.exists():
                 win.iconbitmap(default=str(_icon_path))
         except Exception:
@@ -4768,7 +4775,7 @@ class CrashAnalyzer(_BaseWindow):
         _icon_loaded = False
         try:
             from PIL import Image, ImageTk
-            _ico_path = Path(__file__).parent / "assets" / "icon.ico"
+            _ico_path = resource_path("assets", "icon.ico")
             if _ico_path.exists():
                 pil_img = Image.open(str(_ico_path))
                 if hasattr(pil_img, "n_frames"):
