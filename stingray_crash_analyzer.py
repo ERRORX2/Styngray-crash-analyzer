@@ -74,6 +74,33 @@ EXCEPTION_CODES = {
 
 }
 
+EXCEPTION_HEADLINES = {
+    0xC000001D: "The game crashed because the CPU tried to execute an invalid instruction - usually a sign of corrupted code in memory or a JIT/codegen bug.",
+    0xC0000034: "The game crashed because it tried to open a named system object (event, mutex, etc.) that doesn't exist.",
+    0xC000008C: "The game crashed because it accessed an array using an index outside its valid bounds.",
+    0xC000008E: "The game crashed due to a floating-point division by zero in game or engine code.",
+    0xC0000090: "The game crashed due to an invalid floating-point operation, such as taking the square root of a negative number.",
+    0xC0000094: "The game crashed due to an integer division by zero in game or engine code.",
+    0xC0000095: "The game crashed due to an integer overflow that the CPU flagged as an error.",
+    0xC0000096: "The game crashed because it tried to execute a CPU instruction that requires kernel-level privileges it doesn't have.",
+    0xC0000135: "The game failed to start because a required DLL could not be found - usually a missing or incorrectly installed dependency.",
+    0xC0000139: "The game failed to start because a DLL was found but didn't contain a function the game expected - usually a version mismatch between the game and one of its DLLs.",
+    0xC0000409: "The game crashed because a stack buffer overrun was detected by the compiler's security check (/GS) - typically caused by writing past the end of a local array or buffer.",
+    0xC0000602: "The game crashed because an internal assertion check failed - the engine detected a condition it expected to never happen.",
+    0xC0000006: "The game crashed while reading game files from disk - this usually points to a corrupted installation or a failing/disconnected drive, not a code bug.",
+    0xC0000008: "The game crashed because it tried to use a system handle (file, event, etc.) after that handle had already been closed.",
+    0xC000000D: "The game crashed because it passed an invalid parameter to a Windows system call.",
+    0xC0000017: "The game crashed because it ran out of memory or virtual address space - try closing other applications or increasing your page file size.",
+    0xC000001A: "The game crashed because it tried to access a region of memory that was never mapped into the process.",
+    0xC0000022: "The game crashed due to a permissions error accessing a file or registry key - antivirus software or Windows UAC may be blocking it.",
+    0xC000009A: "The game crashed because Windows ran out of an internal kernel resource (such as handles) - try restarting your PC.",
+    0xC0000353: "The game crashed because a C runtime security check rejected an invalid parameter passed to a standard library function.",
+    0xC0000420: "The game crashed because an assert() check built into the game's release build failed - the developers added a safety check that caught an unexpected condition.",
+    0x80000001: "The game's stack came within a guard page of overflowing - this is an early warning sign of the same cause as a stack overflow (likely infinite recursion).",
+    0x80000002: "The game crashed because the CPU tried to access memory at an address that wasn't properly aligned for the data type being read or written.",
+    0x40010005: "This isn't a crash - it's a Ctrl+C signal sent to a console application, which Windows reports as an exception even though nothing went wrong.",
+}
+
 STINGRAY_PATTERNS = {
     "lua":              ("Lua scripting crash",       YELLOW,
                          "Could be: bad Lua script accessing a nil unit/component, "
@@ -642,7 +669,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
     modules = parsed.get("modules", [])
 
     def _check_msvcp140(m: dict) -> dict:
-        sn   = Path(m["name"]).name.lower()
+        sn   = PureWindowsPath(m["name"]).name.lower()
         path = m["name"].lower().replace("/", "\\")
         size = m.get("size", 0)
         cs   = m.get("checksum", "0x00000000")
@@ -717,7 +744,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
             vc = YELLOW
 
         return {
-            "name":         Path(m["name"]).name,
+            "name":         PureWindowsPath(m["name"]).name,
             "path":         m["name"],
             "base":         m.get("base", "?"),
             "size":         size,
@@ -730,7 +757,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
         }
 
     def _check_discord(m: dict) -> dict:
-        sn   = Path(m["name"]).name.lower()
+        sn   = PureWindowsPath(m["name"]).name.lower()
         path = m["name"].lower().replace("/", "\\")
         size = m.get("size", 0)
         cs   = m.get("checksum", "0x00000000")
@@ -807,7 +834,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
             vc = YELLOW
 
         return {
-            "name":         Path(m["name"]).name,
+            "name":         PureWindowsPath(m["name"]).name,
             "path":         m["name"],
             "base":         m.get("base", "?"),
             "size":         size,
@@ -846,7 +873,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
                 )
             else:
                 issues.append(
-                    f"{Path(m['name']).name} loaded from non-standard path: {m['name']} - "
+                    f"{PureWindowsPath(m['name']).name} loaded from non-standard path: {m['name']} - "
                     "legitimate if shipped by a game installer alongside the exe, "
                     "suspicious if the path is unexpected or temporary."
                 )
@@ -930,7 +957,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
             vc = YELLOW
 
         return {
-            "name":           Path(m["name"]).name,
+            "name":           PureWindowsPath(m["name"]).name,
             "path":           m["name"],
             "base":           m.get("base", "?"),
             "size":           size,
@@ -951,7 +978,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
                          "discordgamesdk.dll", "discord_rpc.dll"}
 
     for m in modules:
-        sn = Path(m["name"]).name.lower()
+        sn = PureWindowsPath(m["name"]).name.lower()
         if sn == "msvcp140.dll":
             msvcp140_result = _check_msvcp140(m)
         elif sn in DISCORD_DLL_NAMES:
@@ -1324,7 +1351,7 @@ def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name, addr - base
+                    return PureWindowsPath(m["name"]).name, addr - base
             except Exception:
                 pass
         return None, 0
@@ -1370,7 +1397,7 @@ def analyse_threads(parsed: dict) -> list:
 
     ntdll_base = None
     for m in modules:
-        if Path(m["name"]).name.lower() == "ntdll.dll":
+        if PureWindowsPath(m["name"]).name.lower() == "ntdll.dll":
             try:
                 ntdll_base = int(m["base"], 16)
             except Exception:
@@ -1382,7 +1409,7 @@ def analyse_threads(parsed: dict) -> list:
             try:
                 base = int(m["base"], 16)
                 if base <= rip < base + m["size"]:
-                    return m["name"], Path(m["name"]).name, rip - base
+                    return m["name"], PureWindowsPath(m["name"]).name, rip - base
             except Exception:
                 pass
         return None, None, 0
@@ -1516,7 +1543,7 @@ def _detect_recursion(parsed: dict) -> str:
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name, addr - base
+                    return PureWindowsPath(m["name"]).name, addr - base
             except Exception:
                 pass
         return None, 0
@@ -1581,7 +1608,7 @@ def _find_dll_init_suspect(parsed: dict) -> str:
             try:
                 base = int(m["base"], 16)
                 if base <= ex_addr < base + m["size"]:
-                    name = Path(m["name"]).name
+                    name = PureWindowsPath(m["name"]).name
                     off  = ex_addr - base
                     return (f"The crash address (0x{ex_addr:016X}) landed inside {name} +0x{off:X}. "
                             f"This is the DLL whose DllMain failed or threw an exception. "
@@ -1591,7 +1618,7 @@ def _find_dll_init_suspect(parsed: dict) -> str:
             except Exception:
                 pass
 
-    mod_names_lower = {Path(m["name"]).name.lower() for m in modules}
+    mod_names_lower = {PureWindowsPath(m["name"]).name.lower() for m in modules}
 
     missing = []
     if "msvcp140.dll" not in mod_names_lower and "vcruntime140.dll" not in mod_names_lower:
@@ -1610,9 +1637,9 @@ def _find_dll_init_suspect(parsed: dict) -> str:
     suspicious = []
     for m in modules:
         path = m["name"].lower().replace("/", "\\")
-        name = Path(m["name"]).name.lower()
+        name = PureWindowsPath(m["name"]).name.lower()
         if "\\temp\\" in path or "\\downloads\\" in path:
-            suspicious.append(Path(m["name"]).name)
+            suspicious.append(PureWindowsPath(m["name"]).name)
 
     if suspicious:
         return (f"Suspicious DLL load paths detected: {', '.join(suspicious)}. "
@@ -1631,7 +1658,7 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
 
     hints = []
     modules   = parsed.get("modules", [])
-    all_names = " ".join(Path(m["name"]).name.lower() for m in modules)
+    all_names = " ".join(PureWindowsPath(m["name"]).name.lower() for m in modules)
 
     has_dstorage = "dstorage" in all_names
 
@@ -1684,11 +1711,11 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
             for m in modules:
                 base = int(m["base"], 16)
                 if base <= ca < base + m["size"]:
-                    n = Path(m["name"]).name.lower()
+                    n = PureWindowsPath(m["name"]).name.lower()
                     if n in GPU_DRIVER_DLLS:
-                        crash_in_driver = (Path(m["name"]).name, GPU_DRIVER_DLLS[n], ca - base)
+                        crash_in_driver = (PureWindowsPath(m["name"]).name, GPU_DRIVER_DLLS[n], ca - base)
                     elif n in GPU_RUNTIME_DLLS:
-                        crash_in_runtime = (Path(m["name"]).name, GPU_RUNTIME_DLLS[n], ca - base)
+                        crash_in_runtime = (PureWindowsPath(m["name"]).name, GPU_RUNTIME_DLLS[n], ca - base)
                     break
         except Exception:
             pass
@@ -1757,13 +1784,13 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
                     base = int(m["base"], 16)
                     if not (base <= crash_addr < base + m["size"]):
                         continue
-                    mod_name = Path(m["name"]).name.lower()
+                    mod_name = PureWindowsPath(m["name"]).name.lower()
                     offset   = crash_addr - base
                     for kw, (label, colour, could_be) in STINGRAY_PATTERNS.items():
                         if kw in mod_name:
                             hints.append((
                                 label,
-                                f"Crash address landed inside {Path(m['name']).name}  +0x{offset:X}",
+                                f"Crash address landed inside {PureWindowsPath(m['name']).name}  +0x{offset:X}",
                                 colour,
                                 could_be,
                             ))
@@ -1783,13 +1810,13 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
             try:
                 crash_addr = int(ex["address"], 16)
                 for m in parsed.get("modules", []):
-                    mname = Path(m["name"]).name.lower()
+                    mname = PureWindowsPath(m["name"]).name.lower()
                     if "dstorage" in mname:
                         base = int(m["base"], 16)
                         if base <= crash_addr < base + m["size"]:
                             hints.insert(0, (
                                 "⚠ DIRECTSTORAGE FAILURE",
-                                f"Crash address landed inside {Path(m['name']).name} - DirectStorage itself crashed.",
+                                f"Crash address landed inside {PureWindowsPath(m['name']).name} - DirectStorage itself crashed.",
                                 PURPLE,
                                 "The crash occurred inside the DirectStorage runtime, not just near it. "
                                 "This points directly at a DS failure: GPU decompression error, "
@@ -1833,6 +1860,25 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
             hints.append(("Breakpoint in Release Build", "__debugbreak() or assert left in shipping code", YELLOW,
                 "Could be: a debug assert accidentally shipped, an __debugbreak() in error handling code, "
                 "or an anti-cheat / DRM trigger firing incorrectly."))
+        if "80000004" in code:
+            hints.append(("Single-Step Trap (Not a Real Crash)",
+                "0x80000004: the CPU's trap flag fired after executing one instruction - "
+                "this is what a debugger does, not what a fault looks like", YELLOW,
+                "This is a debugger trap, not an engine or game error. The CPU executed exactly one "
+                "instruction and then raised this exception because the trap (single-step) flag was set - "
+                "that flag is set by a debugger when stepping through code, not by anything the game itself "
+                "can trigger from a bug. "
+                "Three likely explanations: (1) a debugger such as WinDbg, x64dbg, or Visual Studio was "
+                "attached to the process and a step/breakpoint action produced this dump; "
+                "(2) an anti-cheat or anti-tamper system (EasyAntiCheat, BattlEye, or a custom Stingray "
+                "anti-debug check) detected single-stepping/tracing - a common technique used by cheats and "
+                "reverse-engineering tools - and force-terminated the process, capturing this dump as evidence; "
+                "(3) a debugger was attached and then detached uncleanly, leaving a stale trap flag that fired "
+                "on the next instruction. "
+                "Check the module list for anti-cheat components (EasyAntiCheat.dll, BEService.exe) and check "
+                "whether a debugger or trainer/cheat tool was running at the time. The register values and "
+                "call chain captured in this dump describe whatever instruction happened to execute next - "
+                "they are not evidence of a bug and should not be treated as a crash site."))
 
     return hints
 
@@ -2019,7 +2065,7 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name, addr - base, m["name"], base
+                    return PureWindowsPath(m["name"]).name, addr - base, m["name"], base
             except Exception:
                 pass
         return None, 0, "", 0
@@ -2034,7 +2080,7 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
     for m in modules:
         try:
             base = int(m["base"], 16)
-            name = Path(m["name"]).name
+            name = PureWindowsPath(m["name"]).name
             full = m["name"].lower().replace("/", "\\")
             if is_engine_frame(name, full):
                 pdata_cache[base] = _load_pdata(raw, memory_map, base)
@@ -2113,7 +2159,7 @@ def _active_game_threads_at_crash(parsed: dict) -> list:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
                     full = m["name"].lower().replace("/", "\\")
-                    return Path(m["name"]).name, addr - base, full
+                    return PureWindowsPath(m["name"]).name, addr - base, full
             except Exception:
                 pass
         return None, 0, ""
@@ -2155,7 +2201,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    n = Path(m["name"]).name
+                    n = PureWindowsPath(m["name"]).name
                     return n, addr - base, m["name"]
             except Exception:
                 pass
@@ -2182,6 +2228,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         params  = ex.get("params", [])
         ex_addr = int(ex.get("address", "0"), 16)
 
+        fault_addr   = None
         _pre_decoded = None
         try:
             _imem = read_virtual_memory(parsed, ex_addr, 16)
@@ -2311,7 +2358,8 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
     near_nulls = null_info["near_null"]
 
     if null_regs:
-        bad_reg = _identify_bad_register(_pre_decoded, null_regs, fault_addr) if _pre_decoded else None
+        bad_reg = (_identify_bad_register(_pre_decoded, null_regs, fault_addr)
+                   if _pre_decoded and fault_addr is not None else None)
         if len(null_regs) == 1:
             reg, val = next(iter(null_regs.items()))
             confirmed_str = (" This matches the base register in the crash instruction - "
@@ -2429,6 +2477,33 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                 ),
                 "link": None,
             })
+        if ex_code == 0x80000004:
+            anticheat_names = ("easyanticheat", "beclient", "beservice", "battleye")
+            found_anticheat = [PureWindowsPath(m["name"]).name for m in modules
+                               if any(n in m["name"].lower() for n in anticheat_names)]
+            if found_anticheat:
+                ac_detail = (
+                    f"Anti-cheat component(s) present in the module list: {', '.join(found_anticheat)}. "
+                    "Single-step traps are a known technique anti-cheat systems use to detect debuggers "
+                    "and tracing tools - this dump may have been captured at the moment the anti-cheat "
+                    "force-terminated the process after detecting tampering."
+                )
+            else:
+                ac_detail = (
+                    "No anti-cheat component found in the module list, so this is more likely an "
+                    "externally-attached debugger (WinDbg, x64dbg, Visual Studio) stepping through the "
+                    "process, or a stale trap flag left over from a debugger that detached uncleanly."
+                )
+            findings.insert(0, {"conf": "HIGH",
+                "title": "Not a real crash - single-step debugger trap (0x80000004)",
+                "detail": (
+                    "This exception code means the CPU's trap flag was set and fired after exactly one "
+                    "instruction executed - that is what a debugger does when stepping through code, not "
+                    "something a game bug can trigger. The register values and call chain captured here "
+                    "describe whatever instruction happened to run next, not a fault site. " + ac_detail
+                ),
+                "link": None,
+            })
     except Exception:
         pass
 
@@ -2493,7 +2568,7 @@ def build_summary(parsed: dict) -> str:
             for m in parsed.get("modules", []):
                 base = int(m["base"], 16)
                 if base <= crash_addr < base + m["size"]:
-                    crash_mod = f"{Path(m['name']).name}  +0x{crash_addr - base:X}"
+                    crash_mod = f"{PureWindowsPath(m['name']).name}  +0x{crash_addr - base:X}"
                     break
             lines.append(f"  In      : {crash_mod or '(address outside all known modules)'}")
         except Exception:
@@ -2519,7 +2594,7 @@ def build_summary(parsed: dict) -> str:
         lines.append("")
         lines.append(f"── MODULES ({len(mods)}) ──────────────────────────────────")
         for m in mods[:30]:
-            name = Path(m["name"]).name if m["name"] else "?"
+            name = PureWindowsPath(m["name"]).name if m["name"] else "?"
             lines.append(f"  {name:<40} base={m['base']}  size={m['size']:,}")
         if len(mods) > 30:
             lines.append(f"  … and {len(mods)-30} more")
@@ -3206,7 +3281,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
     params   = ex.get("params", [])
     fault_addr = int(params[1], 16) if len(params) >= 2 else 0
     ex_addr  = int(ex.get("address", "0"), 16) if ex else 0
-    all_mods = " ".join(Path(m["name"]).name.lower() for m in modules)
+    all_mods = " ".join(PureWindowsPath(m["name"]).name.lower() for m in modules)
     CRASH_HANDLERS = {"crs-client.dll", "crashpad_handler.exe", "crashrpt.dll"}
     SYSTEM_PREFIXES = ("c:\\windows\\", "c:\\program files\\windows")
 
@@ -3215,7 +3290,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name
+                    return PureWindowsPath(m["name"]).name
             except Exception:
                 pass
         return None
@@ -3228,7 +3303,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
         rip = t.get("rip", 0)
         mod = mod_for_addr(rip)
         if mod:
-            full = next((m["name"] for m in modules if Path(m["name"]).name == mod), "")
+            full = next((m["name"] for m in modules if PureWindowsPath(m["name"]).name == mod), "")
             fl   = full.lower().replace("/", "\\")
             if "\\windows\\" not in fl and mod.lower() not in CRASH_HANDLERS:
                 active_mods.append((mod.lower(), 0))
@@ -3236,7 +3311,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
         if rsp:
             for depth, (addr, smod, soff) in enumerate(walk_stack(parsed, rsp, max_frames=8), start=1):
                 if not smod: continue
-                full = next((m["name"] for m in modules if Path(m["name"]).name == smod), "")
+                full = next((m["name"] for m in modules if PureWindowsPath(m["name"]).name == smod), "")
                 fl   = full.lower().replace("/", "\\")
                 if "\\windows\\" not in fl and smod.lower() not in CRASH_HANDLERS:
                     active_mods.append((smod.lower(), depth))
@@ -3307,7 +3382,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
     params     = ex.get("params", [])
     fault_addr = int(params[1], 16) if len(params) >= 2 else 0
     ex_addr    = int(ex.get("address", "0"), 16) if ex else 0
-    all_mods   = " ".join(Path(m["name"]).name.lower() for m in modules)
+    all_mods   = " ".join(PureWindowsPath(m["name"]).name.lower() for m in modules)
 
     CRASH_HANDLERS  = {"crs-client.dll", "crashpad_handler.exe", "crashrpt.dll",
                        "sentry.dll", "backtrace.dll"}
@@ -3329,14 +3404,14 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name
+                    return PureWindowsPath(m["name"]).name
             except Exception:
                 pass
         return None
 
     def full_path_for_mod(mod_name: str) -> str:
         return next((m["name"] for m in modules
-                     if Path(m["name"]).name == mod_name), "").lower().replace("/", "\\")
+                     if PureWindowsPath(m["name"]).name == mod_name), "").lower().replace("/", "\\")
 
     def is_game_mod(mod_name: str) -> bool:
 
@@ -3963,7 +4038,7 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
             try:
                 base = int(m["base"], 16)
                 if base <= addr < base + m["size"]:
-                    return Path(m["name"]).name, addr - base
+                    return PureWindowsPath(m["name"]).name, addr - base
             except Exception:
                 pass
         return None, 0
@@ -3999,6 +4074,21 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         headline = "The game crashed due to heap corruption - memory was overwritten"
     elif ex_code == 0xE06D7363:
         headline = "The game crashed due to an unhandled internal error (C++ exception)"
+    elif ex_code == 0xC0000142:
+        headline = "The game failed to launch - a required DLL failed to initialise before the game even started running."
+    elif ex_code in (0x80000003, 0x80000004):
+        anticheat_names = ("easyanticheat", "beclient", "beservice", "battleye")
+        found_anticheat = any(any(n in m["name"].lower() for n in anticheat_names)
+                              for m in modules)
+        trap_kind = "a breakpoint" if ex_code == 0x80000003 else "a single-step trace"
+        if found_anticheat:
+            headline = (f"This isn't a real crash - {trap_kind} was hit, and an anti-cheat system is present. "
+                        f"The anti-cheat likely detected debugging/tracing and force-closed the game.")
+        else:
+            headline = (f"This isn't a real crash - {trap_kind} was hit, which only happens when a debugger "
+                        f"is attached and stepping through the game's code.")
+    elif ex_code in EXCEPTION_HEADLINES:
+        headline = EXCEPTION_HEADLINES[ex_code]
     elif ex_code:
         headline = f"The game crashed with error code {ex.get('code', '?')}"
     else:
@@ -4014,7 +4104,7 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         if not mod:
             continue
         full = next((m["name"] for m in modules
-                     if Path(m["name"]).name == mod), "")
+                     if PureWindowsPath(m["name"]).name == mod), "")
         full_lower = full.lower().replace("/", "\\")
         is_sys     = "\\windows\\" in full_lower
         is_handler = mod.lower() in CRASH_HANDLERS
@@ -4057,7 +4147,7 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
 
     active_subsystems = []
     seen_labels = set()
-    all_mod_names = " ".join(Path(m["name"]).name.lower() for m in modules)
+    all_mod_names = " ".join(PureWindowsPath(m["name"]).name.lower() for m in modules)
     for kw, label in SUBSYSTEM_LABELS.items():
         if kw in all_mod_names and label not in seen_labels:
             active_subsystems.append(label)
@@ -4240,13 +4330,43 @@ class CrashAnalyzer(_BaseWindow):
         self._mods_nb.add(f, text=f"  {name}  ")
         return f
 
+    DEBUGGER_SCENARIOS = [
+        ("Access Violation (NULL deref)",       "access_violation",   "Exceptions"),
+        ("Single-Step Trap (debugger/AC)",      "single_step_trap",   "Exceptions"),
+        ("Stack Overflow (recursion)",          "stack_overflow",     "Exceptions"),
+        ("Heap Overflow (write past bounds)",   "heap_overflow",      "Exceptions"),
+        ("DLL Init Failure (0xC0000142)",       "dll_init_fail",      "Exceptions"),
+        ("Unhandled C++ Exception",             "cpp_exception",      "Exceptions"),
+        ("Heap Corruption",                     "heap_corruption",    "Exceptions"),
+        ("Anti-Cheat Block (EAC/BattlEye)",     "anticheat_block",    "Exceptions"),
+        ("Mod detected (proxy DLL)",            "mod_detected",       "Mods & DLLs"),
+        ("Mod in AppData (suspicious path)",    "appdata_mod",        "Mods & DLLs"),
+        ("DLL Tamper (zeroed checksum)",        "dll_tamper",         "Mods & DLLs"),
+        ("DLL Version Mismatch",                "dll_mismatch",       "Mods & DLLs"),
+        ("Discord DLL in System32",             "discord_hijack",     "Mods & DLLs"),
+        ("Missing VC++ Runtime entirely",       "missing_runtime",    "Mods & DLLs"),
+        ("Everything Clean (baseline-good)",    "clean_baseline",     "Baselines"),
+        ("Kitchen Sink (multiple issues)",      "kitchen_sink",       "Baselines"),
+    ]
 
+    DEBUGGER_SECTIONS = [
+        ("synthetic",  "1. Synthetic Data"),
+        ("pipeline",   "2. Core Analysis Pipeline"),
+        ("stack",      "3. Stack Analysis"),
+        ("dllinit",    "4. DLL Init Failure Handler"),
+        ("dllverify",  "5. DLL Authenticity Verification"),
+        ("patterns",   "6. Pattern Matching"),
+        ("mods",       "7. Mod Detection & Severity Ranking"),
+        ("sentinel",   "8. Sentinel Timestamp Whitelist"),
+        ("env",        "9. Environment & Dependencies"),
+    ]
 
     def _open_debugger(self, event=None):
         """Launch the internal feature-test debugger."""
         win = tk.Toplevel(self)
         win.title("Internal Debugger - Feature Test")
-        win.geometry("960x680")
+        win.geometry("1100x760")
+        win.minsize(820, 560)
         win.configure(bg=BG)
         try:
             _icon_path = resource_path("assets", "icon.ico")
@@ -4263,30 +4383,74 @@ class CrashAnalyzer(_BaseWindow):
                  bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(side="left")
         tk.Frame(win, bg=ACCENT, height=2).pack(fill="x")
 
-        ctrl = tk.Frame(win, bg=BG3, padx=16, pady=10)
-        ctrl.pack(fill="x")
-        tk.Label(ctrl, text="Scenario:", bg=BG3, fg=TEXT_DIM,
-                 font=(UI_FONT, 9)).pack(side="left")
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True)
+
+        left = tk.Frame(body, bg=BG3, width=300)
+        left.pack(side="left", fill="y")
+        left.pack_propagate(False)
+
+        right = tk.Frame(body, bg=BG)
+        right.pack(side="left", fill="both", expand=True)
+
+        tk.Label(left, text="Scenario", bg=BG3, fg=TEXT_DIM,
+                 font=(UI_FONT, 9, "bold"), anchor="w").pack(fill="x", padx=12, pady=(10, 4))
 
         scenario_var = tk.StringVar(value="access_violation")
-        scenarios = [
-            ("Access Violation (NULL deref)",  "access_violation"),
-            ("Stack Overflow (recursion)",      "stack_overflow"),
-            ("DLL Init Failure (0xC0000142)",   "dll_init_fail"),
-            ("Unhandled C++ Exception",         "cpp_exception"),
-            ("Heap Corruption",                 "heap_corruption"),
-            ("Mod detected (proxy DLL)",        "mod_detected"),
-            ("DLL Tamper (zeroed checksum)",    "dll_tamper"),
-            ("DLL Version Mismatch",            "dll_mismatch"),
-            ("Discord DLL in System32",         "discord_hijack"),
-        ]
-        for label, key in scenarios:
-            tk.Radiobutton(ctrl, text=label, variable=scenario_var, value=key,
+
+        picker_canvas = tk.Canvas(left, bg=BG3, highlightthickness=0)
+        picker_sb = tk.Scrollbar(left, orient="vertical", command=picker_canvas.yview,
+                                 bg=BG3, relief="flat")
+        picker_inner = tk.Frame(picker_canvas, bg=BG3)
+        picker_canvas.create_window((0, 0), window=picker_inner, anchor="nw")
+        picker_canvas.configure(yscrollcommand=picker_sb.set)
+        picker_sb.pack(side="right", fill="y")
+        picker_canvas.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        last_category = None
+        for label, key, category in self.DEBUGGER_SCENARIOS:
+            if category != last_category:
+                tk.Label(picker_inner, text=category.upper(), bg=BG3, fg=ACCENT2,
+                         font=(UI_FONT, 7, "bold"), anchor="w").pack(
+                             fill="x", padx=4, pady=(10, 2))
+                last_category = category
+            tk.Radiobutton(picker_inner, text=label, variable=scenario_var, value=key,
                            bg=BG3, fg=TEXT, selectcolor=BG2,
                            activebackground=BG3, activeforeground=ACCENT,
-                           font=(UI_FONT, 8)).pack(side="left", padx=8)
+                           font=(UI_FONT, 8), anchor="w",
+                           justify="left", wraplength=260).pack(fill="x", padx=4, pady=1)
 
-        log_frame = tk.Frame(win, bg=BG)
+        picker_inner.update_idletasks()
+        picker_canvas.configure(scrollregion=picker_canvas.bbox("all"))
+        self._bind_scroll(picker_canvas)
+
+        tk.Frame(left, bg=BORDER, height=1).pack(fill="x", padx=8, pady=(8, 0))
+        tk.Label(left, text="Test Sections", bg=BG3, fg=TEXT_DIM,
+                 font=(UI_FONT, 9, "bold"), anchor="w").pack(fill="x", padx=12, pady=(8, 4))
+
+        section_vars = {}
+        sect_frame = tk.Frame(left, bg=BG3)
+        sect_frame.pack(fill="x", padx=8)
+        for key, label in self.DEBUGGER_SECTIONS:
+            v = tk.BooleanVar(value=True)
+            section_vars[key] = v
+            tk.Checkbutton(sect_frame, text=label, variable=v,
+                           bg=BG3, fg=TEXT, selectcolor=BG2,
+                           activebackground=BG3, activeforeground=ACCENT,
+                           font=(UI_FONT, 8), anchor="w").pack(fill="x", pady=1)
+
+        sect_btn_row = tk.Frame(left, bg=BG3)
+        sect_btn_row.pack(fill="x", padx=8, pady=(4, 10))
+        tk.Button(sect_btn_row, text="All",
+                  command=lambda: [v.set(True) for v in section_vars.values()],
+                  bg=BG2, fg=TEXT_DIM, relief="flat", padx=8, pady=2,
+                  font=(UI_FONT, 7), cursor="hand2").pack(side="left", padx=(0, 4))
+        tk.Button(sect_btn_row, text="None",
+                  command=lambda: [v.set(False) for v in section_vars.values()],
+                  bg=BG2, fg=TEXT_DIM, relief="flat", padx=8, pady=2,
+                  font=(UI_FONT, 7), cursor="hand2").pack(side="left")
+
+        log_frame = tk.Frame(right, bg=BG)
         log_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
         log = tk.Text(log_frame, bg=BG2, fg=TEXT, font=(UI_MONO, 9),
@@ -4309,13 +4473,51 @@ class CrashAnalyzer(_BaseWindow):
             log.see("end")
             log.configure(state="disabled")
 
+        def run_one():
+            enabled = {k for k, v in section_vars.items() if v.get()}
+            self._run_debugger(scenario_var.get(), emit, win, enabled_sections=enabled)
+
+        def run_all():
+            enabled = {k for k, v in section_vars.items() if v.get()}
+            emit("=" * 70, "head")
+            emit(f"  RUN ALL SCENARIOS  ({len(self.DEBUGGER_SCENARIOS)} total)", "head")
+            emit("=" * 70, "head")
+            emit("")
+            grand_passed = 0
+            grand_failed = 0
+            scenario_results = []
+            for label, key, category in self.DEBUGGER_SCENARIOS:
+                p, f = self._run_debugger(key, emit, win, enabled_sections=enabled,
+                                          compact=True)
+                grand_passed += p
+                grand_failed += f
+                scenario_results.append((label, key, p, f))
+            emit("")
+            emit("=" * 70, "head")
+            emit("  RUN ALL - SUMMARY BY SCENARIO", "head")
+            emit("=" * 70, "head")
+            for label, key, p, f in scenario_results:
+                tag = "ok" if f == 0 else "fail"
+                marker = "✔" if f == 0 else "✖"
+                emit(f"  {marker}  {label:<38} {p:>3} passed, {f:>3} failed", tag)
+            emit("")
+            total_tag = "ok" if grand_failed == 0 else "fail"
+            emit(f"  GRAND TOTAL: {grand_passed} passed, {grand_failed} failed "
+                 f"across {len(self.DEBUGGER_SCENARIOS)} scenarios", total_tag)
+            emit("=" * 70, "head")
+
         bot = tk.Frame(win, bg=BG2, padx=16, pady=8)
         bot.pack(fill="x", side="bottom")
-        tk.Button(bot, text="▶  Run Tests",
-                  command=lambda: self._run_debugger(scenario_var.get(), emit, win),
+        tk.Button(bot, text="▶  Run Selected",
+                  command=run_one,
                   bg=ACCENT, fg="white", activebackground=ACCENT2,
                   relief="flat", padx=16, pady=5,
                   font=(UI_FONT, 9, "bold"), cursor="hand2").pack(side="left")
+        tk.Button(bot, text="▶▶  Run All Scenarios",
+                  command=run_all,
+                  bg=PURPLE, fg="white", activebackground=ACCENT2,
+                  relief="flat", padx=16, pady=5,
+                  font=(UI_FONT, 9, "bold"), cursor="hand2").pack(side="left", padx=8)
         tk.Button(bot, text="Apply to Main Window",
                   command=lambda: self._debugger_apply(scenario_var.get()),
                   bg=BG3, fg=TEXT, activebackground=BORDER,
@@ -4367,39 +4569,44 @@ class CrashAnalyzer(_BaseWindow):
         CRASH_THREAD_ID = 0x1A2B
 
         p = {
-            "modules":    [dict(m) for m in BASE_MODULES],
-            "memory_map": [],
-            "_raw_path":  None,
+            "file":         f"[SYNTHETIC] {scenario}.dmp",
+            "size_mb":      12.34,
+            "version":      "1.0.synthetic",
+            "timestamp":    "2026-06-17 12:00:00 UTC",
+            "stream_count": 14,
+            "process_id":   30155,
+            "modules":      [dict(m) for m in BASE_MODULES],
+            "memory_map":   [],
+            "_raw_path":    None,
             "threads": [
                 {
-                    "id":   CRASH_THREAD_ID,
-                    "rip":  CRASH_RIP,
-                    "rsp":  CRASH_RSP,
-                    "name": "GameThread",
-                    "frames": [
-                        (CRASH_RIP,            "engine.dll",  0x123456),
-                        (0x0000000180654321,   "engine.dll",  0x654321),
-                        (0x0000000140ABCDEF,   "game.exe",    0xABCDEF),
-                    ],
-                    "state": "RUNNING",
+                    "tid":     CRASH_THREAD_ID,
+                    "suspend": 0,
+                    "pri":     8,
+                    "rip":     CRASH_RIP,
+                    "rsp":     CRASH_RSP,
+                    "rax": 0, "rcx": 0, "rdx": 0, "rbx": 0,
+                    "rbp": CRASH_RSP + 0x80, "rsi": 0, "rdi": 0,
+                    "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+                    "r12": 0, "r13": 0, "r14": 0, "r15": 0,
                 },
                 {
-                    "id":   0x3C4D,
-                    "rip":  0x00007FF800001234,
-                    "rsp":  0x000000C800200000,
-                    "name": "RenderThread",
-                    "frames": [
-                        (0x00007FF800001234, "ntdll.dll",    0x1234),
-                        (0x0000000180AABBCC, "engine.dll",   0xAABBCC),
-                    ],
-                    "state": "WAIT",
+                    "tid":     0x3C4D,
+                    "suspend": 0,
+                    "pri":     8,
+                    "rip":     0x00007FF800001234,
+                    "rsp":     0x000000C800200000,
+                    "rax": 0, "rcx": 0, "rdx": 0, "rbx": 0,
+                    "rbp": 0, "rsi": 0, "rdi": 0,
+                    "r8": 0, "r9": 0, "r10": 0, "r11": 0,
+                    "r12": 0, "r13": 0, "r14": 0, "r15": 0,
                 },
             ],
             "exception": {
                 "code":        "0xc0000005",
                 "code_desc":   "EXCEPTION_ACCESS_VIOLATION",
                 "address":     f"0x{CRASH_RIP:016X}",
-                "thread_id":   f"0x{CRASH_THREAD_ID:04X}",
+                "thread_id":   CRASH_THREAD_ID,
                 "fault_addr":  "0x0000000000000000",
                 "is_write":    False,
                 "regs": {
@@ -4422,12 +4629,12 @@ class CrashAnalyzer(_BaseWindow):
                 },
                 "params": ["0x0000000000000000", "0x0000000000000000"],
             },
-            "system": {
+            "system_info": {
+                "arch":       "x64",
+                "cpu_level":  6,
+                "cpu_rev":    0xA701,
                 "cpu_count":  8,
-                "cpu_arch":   "x86_64",
-                "os_version": "Windows 11 22H2 (22621)",
-                "mem_total":  16_384,
-                "mem_avail":  8_192,
+                "os_version": "10.0 build 22621",
             },
             "game_root": "C:\\Program Files\\Game",
         }
@@ -4437,9 +4644,7 @@ class CrashAnalyzer(_BaseWindow):
             p["exception"]["code"]      = "0xc00000fd"
             p["exception"]["code_desc"] = "EXCEPTION_STACK_OVERFLOW"
             p["exception"]["address"]   = "0x0000000180BEEF00"
-            frames = [(0x0000000180BEEF00, "engine.dll", 0xBEEF00)] * 40
-            frames += [(0x0000000140001234, "game.exe",  0x1234)]
-            p["threads"][0]["frames"] = frames
+
 
         elif scenario == "dll_init_fail":
             p["exception"]["code"]      = "0xc0000142"
@@ -4491,17 +4696,93 @@ class CrashAnalyzer(_BaseWindow):
                 if "discord_game_sdk" in m["name"].lower():
                     m["name"] = "C:\\Windows\\System32\\discord_game_sdk.dll"
 
+        elif scenario == "single_step_trap":
+            p["exception"]["code"]       = "0x80000004"
+            p["exception"]["code_desc"]  = "SINGLE_STEP - Single-step trace trap"
+            p["exception"]["address"]    = "0x00007FFF04F648C1"
+            p["exception"]["fault_addr"] = None
+            p["exception"]["params"]     = []
+            p["exception"]["regs"]["rdx"] = 0
+            p["exception"]["regs"]["rsi"] = 0
+
+        elif scenario == "heap_overflow":
+            p["exception"]["code"]       = "0xc0000005"
+            p["exception"]["code_desc"]  = "EXCEPTION_ACCESS_VIOLATION"
+            p["exception"]["address"]    = "0x0000000180789ABC"
+            p["exception"]["fault_addr"] = "0x000001F2A4B01018"
+            p["exception"]["is_write"]   = True
+            p["exception"]["params"]     = ["0x1", "0x1F2A4B01018"]
+
+        elif scenario == "anticheat_block":
+            p["modules"].append({
+                "name": "C:\\Program Files\\Game\\EasyAntiCheat.dll",
+                "base": "0x0000000183000000",
+                "size": 2_400_000,
+                "checksum": "0x00248A00", "timestamp": "2025-11-01",
+                "version": "5.0.1.0",
+            })
+            p["exception"]["code"]      = "0xc0000005"
+            p["exception"]["code_desc"] = "EXCEPTION_ACCESS_VIOLATION"
+            p["exception"]["address"]   = "0x0000000183012340"
+
+        elif scenario == "appdata_mod":
+            p["modules"].append({
+                "name": "C:\\Users\\Player\\AppData\\Local\\SomeModLoader\\inject.dll",
+                "base": "0x00007FF6A8000000", "size": 310_000,
+                "checksum": "0x00050A00", "timestamp": "2025-08-15",
+                "version": "2.1.0.0",
+            })
+
+        elif scenario == "missing_runtime":
+            runtime_names = {"msvcp140.dll", "vcruntime140.dll",
+                             "vcruntime140_1.dll", "ucrtbase.dll"}
+            p["modules"] = [m for m in p["modules"]
+                            if PureWindowsPath(m["name"]).name.lower() not in runtime_names]
+            p["exception"]["code"]      = "0xc0000142"
+            p["exception"]["code_desc"] = "STATUS_DLL_INIT_FAILED"
+            p["exception"]["address"]   = "0x0000000140001000"
+
+        elif scenario == "clean_baseline":
+            pass
+
+        elif scenario == "kitchen_sink":
+            for m in p["modules"]:
+                if "msvcp140" in m["name"].lower():
+                    m["checksum"] = "0x00000000"
+                if "discord_game_sdk" in m["name"].lower():
+                    m["name"] = "C:\\Windows\\System32\\discord_game_sdk.dll"
+            p["modules"].append({
+                "name": "C:\\Program Files\\Game\\d3d11.dll",
+                "base": "0x00007FF6B0000000", "size": 1_200_000,
+                "checksum": "0x00126A00", "timestamp": "2023-01-01",
+                "version": "0.0.0.1",
+            })
+
         return p
 
-    def _run_debugger(self, scenario: str, emit, win):
-        """Run all analysis functions against synthetic data and report results."""
+    def _run_debugger(self, scenario: str, emit, win, enabled_sections=None, compact=False):
+        """Run analysis functions against synthetic data and report results.
+
+        enabled_sections: set of section keys to run (see DEBUGGER_SECTIONS).
+                          None means run everything (default/backwards compatible).
+        compact: when True (used by Run All), skips the banner header and only
+                 emits a one-line scenario summary - keeps multi-scenario runs
+                 from flooding the log with 9x duplicate headers.
+        Returns (passed, failed) counts for the caller to aggregate.
+        """
         import traceback, time
 
-        emit("=" * 70, "head")
-        emit(f"  STINGRAY CRASH ANALYZER - FEATURE TEST", "head")
-        emit(f"  Scenario: {scenario}", "head")
-        emit("=" * 70, "head")
-        emit("")
+        def section_on(key):
+            return enabled_sections is None or key in enabled_sections
+
+        if compact:
+            emit(f"── {scenario} " + "─" * max(0, 50 - len(scenario)), "head")
+        else:
+            emit("=" * 70, "head")
+            emit(f"  STINGRAY CRASH ANALYZER - FEATURE TEST", "head")
+            emit(f"  Scenario: {scenario}", "head")
+            emit("=" * 70, "head")
+            emit("")
 
         passed = 0
         failed = 0
@@ -4548,195 +4829,297 @@ class CrashAnalyzer(_BaseWindow):
                 emit(f"  ✖  {label}  - {e}", "fail")
                 failed += 1
 
-        emit("[ 1 ]  Synthetic Data", "head")
-        parsed = check("Build synthetic parsed dict", self._make_synthetic_parsed, scenario)
-        if parsed is None:
-            emit("\nCannot continue - synthetic data construction failed.", "fail")
-            return
-        check_val("parsed has modules",   parsed.get("modules"),   min_len=5)
-        check_val("parsed has exception", parsed.get("exception"), min_len=1)
-        check_val("parsed has threads",   parsed.get("threads"),   min_len=1)
-        check_val("parsed has system",    parsed.get("system"),    min_len=1)
-        emit("")
+        if section_on("synthetic"):
+            emit("[ 1 ]  Synthetic Data", "head")
+        parsed = self._make_synthetic_parsed(scenario)
+        if section_on("synthetic"):
+            check("Build synthetic parsed dict", lambda: parsed)
+            if parsed is None:
+                emit("\nCannot continue - synthetic data construction failed.", "fail")
+                return (passed, failed)
+            check_val("parsed has modules",   parsed.get("modules"),   min_len=5)
+            check_val("parsed has exception", parsed.get("exception"), min_len=1)
+            check_val("parsed has threads",   parsed.get("threads"),   min_len=1)
+            check_val("parsed has system_info", parsed.get("system_info"), min_len=1)
+            emit("")
+        elif parsed is None:
+            return (passed, failed)
 
-        emit("[ 2 ]  Core Analysis Pipeline", "head")
-
-        summary = check("build_summary()", build_summary, parsed)
-        check_val("summary is non-empty string", summary, min_len=10)
-
-        hints = check("quick_patterns()", quick_patterns, parsed)
-        check_val("quick_patterns returns list", hints, min_len=0)
-
-        rootcause = check("assess_root_cause()", assess_root_cause, parsed)
-        check_val("assess_root_cause returns list", rootcause, min_len=1)
-        if rootcause:
-            check_val("root cause has title",  rootcause[0].get("title"), min_len=3)
-            check_val("root cause has detail", rootcause[0].get("detail"), min_len=5)
-            check_val("root cause has conf",   rootcause[0].get("conf")   in ("HIGH","MED","LOW"), expected=True)
-
-        mods = check("detect_mods()", detect_mods, parsed)
-        check_val("detect_mods returns dict", mods is not None, expected=True)
-        check_val("detect_mods has has_mods key", "has_mods" in (mods or {}), expected=True)
-        check_val("detect_mods has indicators",   "indicators" in (mods or {}), expected=True)
-
-        threads = check("analyse_threads()", analyse_threads, parsed)
-        check_val("analyse_threads returns list", threads, min_len=1)
-
-        plain = check("build_plain_english()", build_plain_english, parsed, rootcause, mods, None)
-        check_val("plain english has summary key", "summary" in (plain or {}), expected=True)
-
-        dll_verify = check("verify_critical_dlls()", verify_critical_dlls, parsed)
-        check_val("dll_verify has msvcp140 key", "msvcp140" in (dll_verify or {}), expected=True)
-        check_val("dll_verify has runtime key",  "runtime"  in (dll_verify or {}), expected=True)
-        check_val("dll_verify has discord key",  "discord"  in (dll_verify or {}), expected=True)
-
-        emit("")
-
-        emit("[ 3 ]  Stack Analysis", "head")
-
-        chain = check("_reconstruct_call_chain()", _reconstruct_call_chain, parsed, 12)
-        emit(f"  ·  Chain frames: {len(chain) if chain is not None else 0} "
-             f"(0 expected - no memory map in synthetic mode)", "dim")
-
-        unwind = parsed.get("_stack_unwind", {})
-        emit(f"  ·  pdata modules: {unwind.get('pdata_modules', 0)} / "
-             f"{unwind.get('total_modules', 0)}", "dim")
-        emit(f"  ·  pdata confirmed: {unwind.get('pdata_confirmed', 0)}, "
-             f"heuristic: {unwind.get('heuristic', 0)}", "dim")
-
-        if scenario == "stack_overflow":
-            emit("  ·  Testing recursion detector:", "dim")
-            recursion = check("_detect_recursion()", _detect_recursion, parsed)
-            check_val("recursion description non-empty", recursion, min_len=20)
-            check_val("recursion mentions engine.dll or overflow",
-                      True, expected=True)
-        emit("")
-
-        emit("[ 4 ]  DLL Init Failure Handler", "head")
-        dll_suspect = check("_find_dll_init_suspect()", _find_dll_init_suspect, parsed)
-        check_val("returns non-empty string", dll_suspect, min_len=10)
-        if scenario == "dll_init_fail":
-            check_val("identifies vcruntime140",
-                      dll_suspect is not None and "vcruntime140" in dll_suspect.lower(),
-                      expected=True)
-        emit("")
-
-        emit("[ 5 ]  DLL Authenticity Verification", "head")
-        if dll_verify:
-            m140 = dll_verify.get("msvcp140")
-            if m140:
-                emit(f"  ·  MSVCP140  verdict: {m140.get('verdict','?')}  "
-                     f"checksum: {m140.get('checksum','?')}  "
-                     f"ts: {m140.get('timestamp_date','?')}", "dim")
-                if scenario == "dll_tamper":
-                    check_val("MSVCP140 flagged as LIKELY_TAMPERED",
-                              m140.get("verdict"), expected="LIKELY_TAMPERED")
-                else:
-                    check_val("MSVCP140 passes clean on legitimate data",
-                              m140.get("verdict"), expected="OK")
-
-            rt = dll_verify.get("runtime", {})
-            for dll_key in ("vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll"):
-                r = rt.get(dll_key)
-                if r:
-                    emit(f"  ·  {dll_key:<26} verdict: {r.get('verdict','?')}  "
-                         f"ts: {r.get('timestamp_date','?')}", "dim")
-                    if scenario not in ("dll_tamper", "dll_mismatch"):
-                        check_val(f"{dll_key} passes clean",
-                                  r.get("verdict"), expected="OK")
-                else:
-                    emit(f"  ·  {dll_key:<26} NOT FOUND in module list", "dim")
-
-            discord_list = dll_verify.get("discord", [])
-            if discord_list:
-                dr = discord_list[0]
-                emit(f"  ·  {dr.get('name','?'):<26} verdict: {dr.get('verdict','?')}", "dim")
-                if scenario == "discord_hijack":
-                    check_val("Discord DLL flagged as LIKELY_TAMPERED",
-                              dr.get("verdict"), expected="LIKELY_TAMPERED")
-                else:
-                    check_val("Discord DLL passes clean", dr.get("verdict"), expected="OK")
-        emit("")
-
-        emit("[ 6 ]  Pattern Matching", "head")
-        try:
-            decoded_instr = None
-            pattern = _match_patterns(parsed, decoded_instr, mods, rootcause)
-            emit(f"  ·  Pattern match result: {pattern!r}", "dim")
-            emit("  ✔  _match_patterns() completed without error", "ok")
-            passed += 1
-        except Exception as e:
-            emit(f"  ✖  _match_patterns() raised: {e}", "fail")
-            failed += 1
-        emit("")
-
-        emit("[ 7 ]  Mod Detection & Severity Ranking", "head")
-        if mods:
-            emit(f"  ·  has_mods:   {mods.get('has_mods')}", "dim")
-            emit(f"  ·  confidence: {mods.get('confidence')}", "dim")
-            for ind in mods.get("indicators", []):
-                sev = ind.get("severity", "?")
-                tag = "fail" if sev == "HIGH" else ("warn" if sev == "MED" else "dim")
-                emit(f"  ·  [{sev:4}] {ind.get('type','?')} - {ind.get('detail','')}", tag)
-            check_val("no workshop_mod indicators",
-                      not any(i.get("type") == "workshop_mod"
-                              for i in mods.get("indicators", [])),
-                      expected=True)
-            if scenario == "mod_detected":
-                check_val("mod detected - has_mods is True", mods.get("has_mods"), expected=True)
-                check_val("at least one indicator present",
-                          len(mods.get("indicators", [])), min_len=1)
-        emit("")
-
-        emit("[ 8 ]  Sentinel Timestamp Whitelist", "head")
-        sentinel_tests = [
-            ("2005-04-16", "vcruntime140.dll", "0x000183C0"),
-            ("2014-06-17", "ucrtbase.dll",     "0x00102A00"),
-            ("2056-12-30", "msvcp140.dll",     "0x00095A40"),
-        ]
-        for ts, dll_name, cs_hex in sentinel_tests:
-            test_mod = {
-                "name": f"C:\\Windows\\System32\\{dll_name}",
-                "base": "0x00007FF700000000",
-                "size": 595_000,
-                "checksum": cs_hex,
-                "timestamp": ts,
-            }
-            test_parsed = {**parsed, "modules": [test_mod]}
-            try:
-                test_verify = verify_critical_dlls(test_parsed)
-                if dll_name == "msvcp140.dll":
-                    result = test_verify.get("msvcp140")
-                else:
-                    result = test_verify.get("runtime", {}).get(dll_name)
-                if result:
-                    ts_issues = [i for i in result.get("issues", [])
-                                 if "future" in i.lower() or "predates" in i.lower()
-                                 or "sentinel" in i.lower()]
-                    if not ts_issues:
-                        emit(f"  ✔  {dll_name} ts={ts} not false-flagged (verdict: {result.get('verdict')})", "ok")
-                        passed += 1
-                    else:
-                        emit(f"  ✖  {dll_name} ts={ts} incorrectly flagged:", "fail")
-                        for i in ts_issues:
-                            emit(f"       {i[:80]}…", "fail")
-                        failed += 1
-                else:
-                    emit(f"  ·  {dll_name} not found in test verify result", "dim")
-            except Exception as e:
-                emit(f"  ✖  sentinel test for {dll_name}: {e}", "fail")
-                failed += 1
-        emit("")
-
-        emit("─" * 70, "dim")
-        total = passed + failed + warned
-        emit(f"  Results: {passed} passed  |  {failed} failed  |  {warned} warnings  |  {total} total", 
-             "ok" if failed == 0 else "fail")
-        if failed == 0:
-            emit("  All tests passed.", "ok")
+        if section_on("pipeline"):
+            emit("[ 2 ]  Core Analysis Pipeline", "head")
+            summary = check("build_summary()", build_summary, parsed)
+            check_val("summary is non-empty string", summary, min_len=10)
+            hints = check("quick_patterns()", quick_patterns, parsed)
+            check_val("quick_patterns returns list", hints, min_len=0)
+            rootcause = check("assess_root_cause()", assess_root_cause, parsed)
+            check_val("assess_root_cause returns list", rootcause, min_len=1)
+            if rootcause:
+                check_val("root cause has title",  rootcause[0].get("title"), min_len=3)
+                check_val("root cause has detail", rootcause[0].get("detail"), min_len=5)
+                check_val("root cause has conf",   rootcause[0].get("conf")   in ("HIGH","MED","LOW"), expected=True)
+            mods = check("detect_mods()", detect_mods, parsed)
+            check_val("detect_mods returns dict", mods is not None, expected=True)
+            check_val("detect_mods has has_mods key", "has_mods" in (mods or {}), expected=True)
+            check_val("detect_mods has indicators",   "indicators" in (mods or {}), expected=True)
+            threads = check("analyse_threads()", analyse_threads, parsed)
+            check_val("analyse_threads returns list", threads, min_len=1)
+            plain = check("build_plain_english()", build_plain_english, parsed, rootcause, mods, None)
+            check_val("plain english has headline key", "headline" in (plain or {}), expected=True)
+            dll_verify = check("verify_critical_dlls()", verify_critical_dlls, parsed)
+            check_val("dll_verify has msvcp140 key", "msvcp140" in (dll_verify or {}), expected=True)
+            check_val("dll_verify has runtime key",  "runtime"  in (dll_verify or {}), expected=True)
+            check_val("dll_verify has discord key",  "discord"  in (dll_verify or {}), expected=True)
+            emit("")
         else:
-            emit(f"  {failed} test(s) failed - see above for details.", "fail")
-        emit("─" * 70, "dim")
+            try:
+                rootcause  = assess_root_cause(parsed)
+            except Exception:
+                rootcause = []
+            try:
+                mods = detect_mods(parsed)
+            except Exception:
+                mods = {}
+            try:
+                dll_verify = verify_critical_dlls(parsed)
+            except Exception:
+                dll_verify = {}
+
+        if section_on("stack"):
+            emit("[ 3 ]  Stack Analysis", "head")
+            chain = check("_reconstruct_call_chain()", _reconstruct_call_chain, parsed, 12)
+            emit(f"  ·  Chain frames: {len(chain) if chain is not None else 0} "
+                 f"(0 expected - no memory map in synthetic mode)", "dim")
+            unwind = parsed.get("_stack_unwind", {})
+            emit(f"  ·  pdata modules: {unwind.get('pdata_modules', 0)} / "
+                 f"{unwind.get('total_modules', 0)}", "dim")
+            emit(f"  ·  pdata confirmed: {unwind.get('pdata_confirmed', 0)}, "
+                 f"heuristic: {unwind.get('heuristic', 0)}", "dim")
+            if scenario == "stack_overflow":
+                emit("  ·  Testing recursion detector:", "dim")
+                recursion = check("_detect_recursion()", _detect_recursion, parsed)
+                check_val("recursion description non-empty", recursion, min_len=20)
+                check_val("recursion mentions engine.dll or overflow",
+                          True, expected=True)
+            emit("")
+
+        if section_on("dllinit"):
+            emit("[ 4 ]  DLL Init Failure Handler", "head")
+            dll_suspect = check("_find_dll_init_suspect()", _find_dll_init_suspect, parsed)
+            check_val("returns non-empty string", dll_suspect, min_len=10)
+            if scenario == "dll_init_fail":
+                check_val("identifies vcruntime140",
+                          dll_suspect is not None and "vcruntime140" in dll_suspect.lower(),
+                          expected=True)
+            emit("")
+
+        if section_on("dllverify"):
+            emit("[ 5 ]  DLL Authenticity Verification", "head")
+            if dll_verify:
+                m140 = dll_verify.get("msvcp140")
+                if m140:
+                    emit(f"  ·  MSVCP140  verdict: {m140.get('verdict','?')}  "
+                         f"checksum: {m140.get('checksum','?')}  "
+                         f"ts: {m140.get('timestamp_date','?')}", "dim")
+                    if scenario == "dll_tamper":
+                        check_val("MSVCP140 flagged as LIKELY_TAMPERED",
+                                  m140.get("verdict"), expected="LIKELY_TAMPERED")
+                    elif scenario == "dll_mismatch":
+                        check_val("MSVCP140 flagged due to cross-DLL version mismatch",
+                                  m140.get("verdict") != "OK", expected=True)
+                    elif scenario == "kitchen_sink":
+                        check_val("MSVCP140 flagged (tampered checksum in this scenario)",
+                                  m140.get("verdict") != "OK", expected=True)
+                    elif scenario != "missing_runtime":
+                        check_val("MSVCP140 passes clean on legitimate data",
+                                  m140.get("verdict"), expected="OK")
+                elif scenario == "missing_runtime":
+                    emit("  ·  MSVCP140 correctly absent (missing_runtime scenario)", "dim")
+
+                rt = dll_verify.get("runtime", {})
+                for dll_key in ("vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll"):
+                    r = rt.get(dll_key)
+                    if r:
+                        emit(f"  ·  {dll_key:<26} verdict: {r.get('verdict','?')}  "
+                             f"ts: {r.get('timestamp_date','?')}", "dim")
+                        if scenario not in ("dll_tamper", "dll_mismatch", "missing_runtime",
+                                            "kitchen_sink"):
+                            check_val(f"{dll_key} passes clean",
+                                      r.get("verdict"), expected="OK")
+                    else:
+                        emit(f"  ·  {dll_key:<26} NOT FOUND in module list", "dim")
+                        if scenario == "missing_runtime":
+                            check_val(f"{dll_key} correctly absent",
+                                      True, expected=True)
+
+                discord_list = dll_verify.get("discord", [])
+                if discord_list:
+                    dr = discord_list[0]
+                    emit(f"  ·  {dr.get('name','?'):<26} verdict: {dr.get('verdict','?')}", "dim")
+                    if scenario == "discord_hijack":
+                        check_val("Discord DLL flagged as LIKELY_TAMPERED",
+                                  dr.get("verdict"), expected="LIKELY_TAMPERED")
+                    elif scenario not in ("kitchen_sink",):
+                        check_val("Discord DLL passes clean", dr.get("verdict"), expected="OK")
+            emit("")
+
+        if section_on("patterns"):
+            emit("[ 6 ]  Pattern Matching", "head")
+            try:
+                decoded_instr = None
+                pattern = _match_patterns(parsed, decoded_instr, mods, rootcause)
+                emit(f"  ·  Pattern match result: {pattern!r}", "dim")
+                emit("  ✔  _match_patterns() completed without error", "ok")
+                passed += 1
+            except Exception as e:
+                emit(f"  ✖  _match_patterns() raised: {e}", "fail")
+                failed += 1
+            emit("")
+
+        if section_on("mods"):
+            emit("[ 7 ]  Mod Detection & Severity Ranking", "head")
+            if mods:
+                emit(f"  ·  has_mods:   {mods.get('has_mods')}", "dim")
+                emit(f"  ·  confidence: {mods.get('confidence')}", "dim")
+                for ind in mods.get("indicators", []):
+                    sev = ind.get("severity", "?")
+                    tag = "fail" if sev == "HIGH" else ("warn" if sev == "MED" else "dim")
+                    emit(f"  ·  [{sev:4}] {ind.get('type','?')} - {ind.get('detail','')}", tag)
+                check_val("no workshop_mod indicators",
+                          not any(i.get("type") == "workshop_mod"
+                                  for i in mods.get("indicators", [])),
+                          expected=True)
+                if scenario in ("mod_detected", "kitchen_sink"):
+                    check_val("mod detected - has_mods is True", mods.get("has_mods"), expected=True)
+                    check_val("at least one indicator present",
+                              mods.get("indicators", []), min_len=1)
+                if scenario == "appdata_mod":
+                    check_val("mod detected - has_mods is True", mods.get("has_mods"), expected=True)
+                    has_appdata = any(i.get("type") == "appdata_mod"
+                                      for i in mods.get("indicators", []))
+                    check_val("appdata_mod indicator present", has_appdata, expected=True)
+                if scenario == "clean_baseline":
+                    check_val("clean baseline - has_mods is False",
+                              mods.get("has_mods"), expected=False)
+            emit("")
+
+        if section_on("sentinel"):
+            emit("[ 8 ]  Sentinel Timestamp Whitelist", "head")
+            sentinel_tests = [
+                ("2005-04-16", "vcruntime140.dll", "0x000183C0"),
+                ("2014-06-17", "ucrtbase.dll",     "0x00102A00"),
+                ("2056-12-30", "msvcp140.dll",     "0x00095A40"),
+            ]
+            for ts, dll_name, cs_hex in sentinel_tests:
+                test_mod = {
+                    "name": f"C:\\Windows\\System32\\{dll_name}",
+                    "base": "0x00007FF700000000",
+                    "size": 595_000,
+                    "checksum": cs_hex,
+                    "timestamp": ts,
+                }
+                test_parsed = {**parsed, "modules": [test_mod]}
+                try:
+                    test_verify = verify_critical_dlls(test_parsed)
+                    if dll_name == "msvcp140.dll":
+                        result = test_verify.get("msvcp140")
+                    else:
+                        result = test_verify.get("runtime", {}).get(dll_name)
+                    if result:
+                        ts_issues = [i for i in result.get("issues", [])
+                                     if "future" in i.lower() or "predates" in i.lower()
+                                     or "sentinel" in i.lower()]
+                        if not ts_issues:
+                            emit(f"  ✔  {dll_name} ts={ts} not false-flagged (verdict: {result.get('verdict')})", "ok")
+                            passed += 1
+                        else:
+                            emit(f"  ✖  {dll_name} ts={ts} incorrectly flagged:", "fail")
+                            for i in ts_issues:
+                                emit(f"       {i[:80]}…", "fail")
+                            failed += 1
+                    else:
+                        emit(f"  ·  {dll_name} not found in test verify result", "dim")
+                except Exception as e:
+                    emit(f"  ✖  sentinel test for {dll_name}: {e}", "fail")
+                    failed += 1
+            emit("")
+
+        if section_on("env"):
+            emit("[ 9 ]  Environment & Dependencies", "head")
+
+            try:
+                rp = resource_path("assets", "icon.ico")
+                emit(f"  ·  resource_path('assets', 'icon.ico') -> {rp}", "dim")
+                is_frozen = getattr(sys, "frozen", False)
+                emit(f"  ·  sys.frozen: {is_frozen}", "dim")
+                check_val("resource_path returns a Path object",
+                          isinstance(rp, Path), expected=True)
+                passed += 1
+                emit(f"  ✔  resource_path() callable without error", "ok")
+            except Exception as e:
+                emit(f"  ✖  resource_path() raised: {e}", "fail")
+                failed += 1
+
+            try:
+                icon_path = resource_path("assets", "icon.ico")
+                if icon_path.exists():
+                    emit(f"  ✔  assets/icon.ico found on disk", "ok")
+                    passed += 1
+                else:
+                    emit(f"  ⚠  assets/icon.ico NOT found at {icon_path} "
+                         f"(app will fall back to monogram badge - not a hard failure)", "warn")
+                    warned += 1
+            except Exception as e:
+                emit(f"  ✖  icon path check raised: {e}", "fail")
+                failed += 1
+
+            if _DND_AVAILABLE:
+                emit(f"  ✔  tkinterdnd2 available - drag-and-drop active", "ok")
+                passed += 1
+            else:
+                emit(f"  ⚠  tkinterdnd2 NOT installed - drag-and-drop disabled, "
+                     f"Browse button still works (not a hard failure)", "warn")
+                warned += 1
+
+            try:
+                from PIL import Image, ImageTk
+                emit(f"  ✔  Pillow (PIL) available - icon rendering active", "ok")
+                passed += 1
+            except ImportError:
+                emit(f"  ⚠  Pillow NOT installed - drop zone will show monogram "
+                     f"badge instead of the real icon (not a hard failure)", "warn")
+                warned += 1
+
+            try:
+                pattern_data = _load_pattern_file()
+                n_builtin = len(pattern_data.get("builtin_patterns", []))
+                n_custom  = len(pattern_data.get("patterns", []))
+                emit(f"  ·  crash_patterns.json: {n_builtin} builtin, {n_custom} custom patterns", "dim")
+                check_val("pattern file loads without error", True, expected=True)
+                passed += 1
+            except Exception as e:
+                emit(f"  ⚠  crash_patterns.json load raised: {e} "
+                     f"(pattern matching will be limited, not a hard failure)", "warn")
+                warned += 1
+
+            emit(f"  ·  Platform: {sys.platform}, Python {sys.version.split()[0]}", "dim")
+            emit("")
+
+        if not compact:
+            emit("─" * 70, "dim")
+            total = passed + failed + warned
+            emit(f"  Results: {passed} passed  |  {failed} failed  |  {warned} warnings  |  {total} total",
+                 "ok" if failed == 0 else "fail")
+            if failed == 0:
+                emit("  All tests passed.", "ok")
+            else:
+                emit(f"  {failed} test(s) failed - see above for details.", "fail")
+            emit("─" * 70, "dim")
+        else:
+            tag = "ok" if failed == 0 else "fail"
+            emit(f"  -> {passed} passed, {failed} failed, {warned} warnings", tag)
+            emit("")
+
+        return (passed, failed)
 
     def _debugger_apply(self, scenario: str):
         """Apply the synthetic data for the chosen scenario to the main window,
@@ -4944,7 +5327,7 @@ class CrashAnalyzer(_BaseWindow):
                 for m in parsed.get("modules", []):
                     base = int(m["base"], 16)
                     if base <= ca < base + m["size"]:
-                        crash_mod_name = Path(m["name"]).name.lower()
+                        crash_mod_name = PureWindowsPath(m["name"]).name.lower()
                         break
             except Exception:
                 pass
@@ -5203,7 +5586,7 @@ class CrashAnalyzer(_BaseWindow):
 
         for row_i, m in enumerate(modules):
             bg_row   = BG2 if row_i % 2 else BG
-            name     = Path(m["name"]).name if m["name"] else "?"
+            name     = PureWindowsPath(m["name"]).name if m["name"] else "?"
             fullpath = m["name"].lower().replace("/", "\\")
 
             is_crash     = crash_mod_name and name.lower() == crash_mod_name
@@ -5627,7 +6010,7 @@ class CrashAnalyzer(_BaseWindow):
 
         mod_base = next(
             (int(m["base"], 16) for m in parsed.get("modules", [])
-             if Path(m["name"]).name.lower() == module_name.lower()),
+             if PureWindowsPath(m["name"]).name.lower() == module_name.lower()),
             0
         )
         tk.Label(panel,
