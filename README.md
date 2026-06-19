@@ -1,27 +1,44 @@
+![Crash Analyzer Logo](assets/icon.ico) 
 # Stingray Crash Analyzer
+![Latest Release](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.6/release_v1.6.zip)
 
-A desktop tool for analyzing `.dmp` minidump files from games built on the **Autodesk Stingray / Bitsquid engine**.
+Stingray Crash Analyzer is desktop tool for analyzing `.dmp` minidump files from games built on the **Autodesk Stingray / Bitsquid engine**.
 
 ---
 
 <!-- LATEST_RELEASE_START -->
-### Latest Release: v1.6 (2026-06-18)
+### 🚀 Latest Windows Release: v1.6 (2026-06-18)
 
 - Download: [release_release_v1.6.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.6/release_v1.6.zip)
 
-### Integrity
+### 🔐 Integrity
+<details>
 
-- EXE SHA256: 3761B8D5D2D2D1E1529675BD476B54E61B5171A0A3C0CBB0F15D877182850B85
-- crash_patterns.json SHA256: 8D9A46521C669C8012D0BC812C7318B616042A132946A90FBEF91D0AAC5F2108
-- Manifest SHA256: 6875F152C2DB3C61E901154CAB8E7E89983798C6F35F23DEA54EB6A63864E6BE
-- ZIP SHA256: FD7F4B0631447E9223CF445684E5568AAA34E65486692C81F73DB3FEE3BA02C2
+<summary>Cryptographic Hashes</summary>
+
+- EXE SHA256: ``3761B8D5D2D2D1E1529675BD476B54E61B5171A0A3C0CBB0F15D877182850B85``
+- crash_patterns.json SHA256: ``8D9A46521C669C8012D0BC812C7318B616042A132946A90FBEF91D0AAC5F2108``
+- Manifest SHA256: ``6875F152C2DB3C61E901154CAB8E7E89983798C6F35F23DEA54EB6A63864E6BE``
+- ZIP SHA256: ``FD7F4B0631447E9223CF445684E5568AAA34E65486692C81F73DB3FEE3BA02C2``
+
+</details>
 <!-- LATEST_RELEASE_END -->
+
+1. Download the **[Latest Release](../../releases/latest)**.
+2. Download the `release_vX.X.zip` archive.
+3. **Extract the ZIP fully** to a folder of your choice.
+4. Run `StingrayAnalyzer.exe`.
+
+*Ensure `crash_patterns.json` stays in the same folder as the EXE to load your presets.*
 
 ---
 
-## Download
-
-Download the latest `release_vX.X.zip` from the [Releases](../../releases) page. Unzip and run `StingrayAnalyzer.exe`. Keep `crash_patterns.json` in the same folder.
+### 🛠️ Option 2: Running on Linux (Arch/CachyOS)
+1. Install dependencies 
+```sudo pacman -S git python tk python-pandas python-matplotlib python-numpy python-pip```
+2. git clone ``https://github.com/ERRORX2/Styngray-crash-analyzer.git``
+3. cd ``Stingray_crash_analyzer``
+4. python ``stingray_crash_analyzer.py``
 
 ---
 
