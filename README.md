@@ -7,19 +7,20 @@ Stingray Crash Analyzer is desktop tool for analyzing `.dmp` minidump files from
 ---
 
 <!-- LATEST_RELEASE_START -->
-### 🚀 Latest Windows Release: v1.6 (2026-06-18)
+### 🚀 Latest Windows Release: v1.7 (2026-06-24)
 
-- Download: [release_release_v1.6.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.6/release_v1.6.zip)
+- Download: [release_release_v1.7.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v1.7/release_v1.7.zip)
 
 ### 🔐 Integrity
+
 <details>
 
 <summary>Cryptographic Hashes</summary>
 
-- EXE SHA256: ``3761B8D5D2D2D1E1529675BD476B54E61B5171A0A3C0CBB0F15D877182850B85``
-- crash_patterns.json SHA256: ``8D9A46521C669C8012D0BC812C7318B616042A132946A90FBEF91D0AAC5F2108``
-- Manifest SHA256: ``6875F152C2DB3C61E901154CAB8E7E89983798C6F35F23DEA54EB6A63864E6BE``
-- ZIP SHA256: ``FD7F4B0631447E9223CF445684E5568AAA34E65486692C81F73DB3FEE3BA02C2``
+* EXE SHA256: `E83B830D8A2EFA7CAB3FCF0C8D5953C7E2D98280FAE3ED347C0BD5B6C16FB32C`
+* Groups JSON SHA256: `6989F8105A8C01C53654B0CE96C09801D5F99D279907B9F00AFE8811A73AC64E`
+* Manifest SHA256: `4F12CD9D9B3410C21CF4BD51C0342EA5D55F13938ED0E8B8DAC2AE3557DFF84D`
+* ZIP SHA256: `EA0344E364D780ED7264532766E2BC55C2206266EAB4188AC40F47446971CBE5`
 
 </details>
 <!-- LATEST_RELEASE_END -->
@@ -224,6 +225,7 @@ The CI workflow (`.github/workflows/build.yml`) does this automatically on every
 ## License
 
 MIT License - Developed for the hardware enthusiast and troubleshooting community.
+
 
 
 
