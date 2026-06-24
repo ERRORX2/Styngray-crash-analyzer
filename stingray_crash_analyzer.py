@@ -39,6 +39,150 @@ def resource_path(*parts: str) -> Path:
         base = Path(__file__).parent
     return base / Path(*parts)
 
+
+
+DXGI_REMOVAL_REASONS = {
+    "0x887A0005": ("DXGI_ERROR_DEVICE_REMOVED",
+                   "The GPU device was physically removed or powered off, or a driver upgrade "
+                   "was installed that required a reboot, or the GPU reset itself due to overheating "
+                   "or hardware instability. DRED breadcrumbs record what the GPU was doing just "
+                   "before it disappeared.",
+                   "1) Update to the latest GPU driver from NVIDIA/AMD/Intel directly (not just Windows "
+                   "Update) and reboot afterward - a pending driver install can trigger this. "
+                   "2) Check GPU temperatures under load (HWiNFO, GPU-Z) - if the card is thermal-throttling "
+                   "or shutting off, clean dust from the cooler/case and check fan curves. "
+                   "3) If recently changed, reseat the GPU and check the power connectors are fully seated - "
+                   "intermittent power delivery can cause the OS to think the device disappeared. "
+                   "4) Run a GPU stress test (FurMark, OCCT) briefly to see if the same removal reproduces "
+                   "outside the game - if so, this is a hardware/driver issue, not a game bug."),
+    "0x887A0006": ("DXGI_ERROR_DEVICE_HUNG",
+                   "The GPU did not respond to a command within Windows' TDR (Timeout Detection and "
+                   "Recovery) timeout period - usually 2 seconds. This is the most common GPU crash "
+                   "cause and typically means a shader entered an infinite or very long loop, a draw "
+                   "call deadlocked, or the driver got stuck waiting on a GPU fence. "
+                   "DRED breadcrumbs show the last GPU commands issued before the hang.",
+                   "1) Update GPU drivers to the latest version - many DEVICE_HUNG cases are fixed by "
+                   "driver updates addressing specific shader compiler or scheduling bugs. "
+                   "2) Lower graphics settings (especially ray tracing, shadow quality, or any setting tied "
+                   "to the render pass named in the breadcrumb trace below) - if the hang stops, that "
+                   "feature's shader is the likely culprit. "
+                   "3) Disable GPU overclocks/undervolts (including factory OC profiles in vendor software) "
+                   "and test on stock clocks - an unstable overclock causing a hang under specific shader "
+                   "workloads is common. "
+                   "4) If this reproduces in one specific location/scene, that's valuable - report the "
+                   "render pass name and location to the developers along with this DRED log. "
+                   "5) Verify the TDR delay hasn't been manually shortened in the registry "
+                   "(TdrDelay value under HKLM\\SYSTEM\\CurrentControlSet\\Control\\GraphicsDrivers) - if "
+                   "set below the 2-second default, legitimate long-but-not-infinite shaders may be killed "
+                   "prematurely."),
+    "0x887A0007": ("DXGI_ERROR_DEVICE_RESET",
+                   "The GPU was reset (not removed) - Windows' TDR recovered from an earlier hang "
+                   "or another process caused a GPU reset. Breadcrumb data may be from after the reset "
+                   "and should be interpreted with caution.",
+                   "1) Treat this the same as DEVICE_HUNG (see above) - a reset is TDR's recovery action "
+                   "after detecting a hang, so the same fixes apply: update drivers, lower settings tied to "
+                   "the breadcrumb render pass, and check for unstable overclocks. "
+                   "2) Check Windows Event Viewer (Application and System logs) around the crash timestamp "
+                   "for additional driver-reset events from other applications - if resets are happening "
+                   "outside this game too, the issue is system-wide, not game-specific."),
+    "0x887A0020": ("DXGI_ERROR_DRIVER_INTERNAL_ERROR",
+                   "The GPU driver itself hit an internal bug and crashed. This is usually a driver-side "
+                   "bug rather than a game-side bug. The breadcrumbs record what the game was submitting "
+                   "immediately before the driver crashed, which may help identify a known driver-specific "
+                   "workload that triggers this.",
+                   "1) Update to the latest GPU driver - this is the single most effective fix for internal "
+                   "driver errors, since it means the driver itself crashed, not the game. "
+                   "2) If already on the latest driver, try rolling back one or two versions - new driver "
+                   "releases occasionally introduce regressions for specific games or render features. "
+                   "3) Report the render pass name from the breadcrumb trace to NVIDIA/AMD/Intel driver "
+                   "feedback channels in addition to the game developers, since this is most likely fixed "
+                   "on the driver side, not the game side. "
+                   "4) Disable any GPU driver-level overlay/recording features (e.g. in-driver instant "
+                   "replay, performance overlays) temporarily to rule those out as a contributing factor."),
+    "0x887A0001": ("DXGI_ERROR_INVALID_CALL",
+                   "The application made an invalid D3D12 API call. When reported as a device-removed "
+                   "reason, this usually means the API was called in an illegal state - e.g. after the "
+                   "device was already removed by another cause.",
+                   "1) This is almost always a downstream symptom of an earlier, separate device removal - "
+                   "check Windows Event Viewer around this timestamp for an earlier DEVICE_HUNG, "
+                   "DEVICE_REMOVED, or DRIVER_INTERNAL_ERROR event that happened first. "
+                   "2) If this is the only device-removed event with no earlier cause found, this points to "
+                   "an actual game-side bug calling a D3D12 function incorrectly - share this log with the "
+                   "development team since it likely needs a code fix, not a settings/driver change."),
+}
+
+D3D12_BREADCRUMB_OPS = {
+    0:  "SETMARKER",
+    1:  "BEGINEVENT",
+    2:  "ENDEVENT",
+    3:  "DRAWINSTANCED",
+    4:  "DRAWINDEXEDINSTANCED",
+    5:  "EXECUTEINDIRECT",
+    6:  "DISPATCH (compute)",
+    7:  "COPYBUFFERREGION",
+    8:  "COPYTEXTUREREGION",
+    9:  "COPYRESOURCE",
+    10: "COPYTILES",
+    11: "RESOLVESUBRESOURCE",
+    12: "CLEARRENDERTARGETVIEW",
+    13: "CLEARUNORDEREDACCESSVIEW",
+    14: "CLEARDEPTHSTENCILVIEW",
+    15: "RESOURCEBARRIER",
+    16: "EXECUTEBUNDLE",
+    17: "PRESENT",
+    18: "RESOLVEQUERYDATA",
+    19: "BEGINSUBMISSION",
+    20: "ENDSUBMISSION",
+    21: "DECODEFRAME",
+    22: "PROCESSFRAMES",
+    23: "ATOMICCOPYBUFFERUINT",
+    24: "ATOMICCOPYBUFFERUINT64",
+    25: "RESOLVESUBRESOURCEREGION",
+    26: "WRITEBUFFERIMMEDIATE",
+    27: "DECODEFRAME1",
+    28: "SETPROTECTEDRESOURCESESSION",
+    29: "DECODEFRAME2",
+    30: "PROCESSFRAMES1",
+    31: "BUILDRAYTRACINGACCELERATIONSTRUCTURE",
+    32: "EMITRAYTRACINGACCELERATIONSTRUCTUREPOSTBUILDINFO",
+    33: "COPYRAYTRACINGACCELERATIONSTRUCTURE",
+    34: "DISPATCHRAYS (raytracing)",
+    35: "INITIALIZEMETACOMMAND",
+    36: "EXECUTEMETACOMMAND",
+    37: "ESTIMATEMOTION",
+    38: "RESOLVEMOTIONVECTORHEAP",
+    39: "SETPIPELINESTATE1",
+    40: "INITIALIZEEXTENSIONCOMMAND",
+    41: "EXECUTEEXTENSIONCOMMAND",
+    42: "DISPATCHMESH (mesh shaders)",
+    43: "ENCODEFRAME",
+    44: "RESOLVEENCODEROUTPUTMETADATA",
+}
+
+D3D12_HANG_RISK = {
+    "DRAWINSTANCED":               "HIGH",
+    "DRAWINDEXEDINSTANCED":        "HIGH",
+    "DISPATCH (compute)":          "HIGH",
+    "EXECUTEINDIRECT":             "HIGH",
+    "DISPATCHRAYS (raytracing)":   "HIGH",
+    "DISPATCHMESH (mesh shaders)": "HIGH",
+    "EXECUTEMETACOMMAND":          "HIGH",
+    "BUILDRAYTRACINGACCELERATIONSTRUCTURE": "HIGH",
+    "RESOURCEBARRIER":             "MED",
+    "EXECUTEBUNDLE":               "MED",
+    "COPYRESOURCE":                "MED",
+    "COPYTEXTUREREGION":           "MED",
+    "COPYBUFFERREGION":            "MED",
+    "RESOLVESUBRESOURCE":          "MED",
+    "PRESENT":                     "MED",
+    "CLEARRENDERTARGETVIEW":       "LOW",
+    "CLEARDEPTHSTENCILVIEW":       "LOW",
+    "CLEARUNORDEREDACCESSVIEW":    "LOW",
+    "SETMARKER":                   "LOW",
+    "BEGINEVENT":                  "LOW",
+    "ENDEVENT":                    "LOW",
+}
+
 EXCEPTION_CODES = {
     0xC0000005: "⚠ STINGRAY ENGINE SUICIDE (false flag) – Engine detected an internal error and intentionally terminated. This is NOT the root cause - look at engine logs or the call stack for the real trigger.",
     0xC000001D: "ILLEGAL_INSTRUCTION – CPU executed an invalid instruction",
@@ -1652,6 +1796,361 @@ def _find_dll_init_suspect(parsed: dict) -> str:
             f"that broke a system DLL dependency. "
             f"Check the Windows Event Log (Application) for DLL load failure entries "
             f"that occurred at the same time as the crash.")
+
+
+def parse_dred_log(path: str) -> dict:
+    """Parse a DirectX 12 DRED (Device Removed Extended Data) plain-text log file.
+
+    Format produced by D3D12's auto-breadcrumb and DRED feature:
+        Line 1: Device removed, reason: <NAME> (<hex_code>).
+        Repeated Queue: blocks with Crumb: N | OPCODE lines and
+        Crumb index context: N | <label> lines.
+        Final line: DRED page fault address <hex_addr> (...)
+
+    Returns a dict with:
+        removal_reason_code:  hex string e.g. "0x887A0006"
+        removal_reason_name:  DXGI_ERROR_* string
+        removal_reason_desc:  plain-English explanation
+        queues:               list of queue dicts (see below)
+        page_fault_addr:      hex string or None
+        page_fault_ambiguous: True if addr is 0 (per the file's own caveat)
+        _raw_path:            str
+    Each queue dict:
+        index:          int
+        last_completed: int  (last breadcrumb index GPU confirmed complete)
+        crumb_count:    int  (total breadcrumbs in this queue/cmd-list)
+        context_count:  int
+        crumbs:         list of (index: int, opcode: int, op_name: str)
+        contexts:       dict mapping crumb_index -> [label, ...]
+        incomplete:     bool  (True if last_completed < crumb_count - 1)
+        hang_op_index:  int or None  (first op after last_completed, i.e. likely stuck)
+        hang_op_name:   str or None
+        hang_op_context:list of str  (render-pass labels active at hang_op_index)
+    """
+    import re
+
+    result = {
+        "removal_reason_code": None,
+        "removal_reason_name": None,
+        "removal_reason_desc": None,
+        "removal_reason_fix":  None,
+        "queues":              [],
+        "page_fault_addr":     None,
+        "page_fault_ambiguous": False,
+        "_raw_path": path,
+    }
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except Exception as e:
+        result["_error"] = str(e)
+        return result
+
+    if lines:
+        m = re.search(r"reason:\s*(\S+)\s*\((?:0x)?([0-9A-Fa-f]+)\)", lines[0])
+        if m:
+            result["removal_reason_name"] = m.group(1).rstrip(".")
+            result["removal_reason_code"] = "0x" + m.group(2).upper()
+            entry = DXGI_REMOVAL_REASONS.get(result["removal_reason_code"], (None, None, None))
+            result["removal_reason_desc"] = entry[1] or "Unknown device removed reason."
+            result["removal_reason_fix"]  = entry[2] or (
+                "This DXGI error code isn't in the analyzer's reference table yet. "
+                "Share this log with the development team for investigation."
+            )
+
+    if lines:
+        m = re.search(r"DRED page fault address\s+([0-9A-Fa-f]+)", lines[-1])
+        if m:
+            addr_str = m.group(1)
+            addr_int = int(addr_str, 16)
+            result["page_fault_addr"] = f"0x{addr_int:016X}"
+            result["page_fault_ambiguous"] = (addr_int == 0)
+
+    queue_idx    = -1
+    current_q    = None
+    QUEUE_RE     = re.compile(
+        r"^Queue:.*last crumb:\s*[0-9A-Fa-f]+=(\d+)\.\s*"
+        r"Crumb count=(\d+),\s*Context count=(\d+)"
+    )
+    CRUMB_RE     = re.compile(r"^\tCrumb:\s*(\d+)\s*\|\s*(\d+)")
+    CONTEXT_RE   = re.compile(r"^\tCrumb index context:\s*(\d+)\s*\|\s*(.+)")
+
+    for line in lines[1:]:
+        mq = QUEUE_RE.match(line)
+        if mq:
+            if current_q is not None:
+                result["queues"].append(current_q)
+            queue_idx += 1
+            current_q = {
+                "index":          queue_idx,
+                "last_completed": int(mq.group(1)),
+                "crumb_count":    int(mq.group(2)),
+                "context_count":  int(mq.group(3)),
+                "crumbs":         [],
+                "contexts":       {},
+                "incomplete":     False,
+                "hang_op_index":  None,
+                "hang_op_name":   None,
+                "hang_op_context":[],
+            }
+            continue
+
+        if current_q is None:
+            continue
+
+        mc = CRUMB_RE.match(line)
+        if mc:
+            crumb_idx  = int(mc.group(1))
+            opcode_int = int(mc.group(2))
+            op_name    = D3D12_BREADCRUMB_OPS.get(opcode_int, f"UNKNOWN_OP_{opcode_int}")
+            current_q["crumbs"].append((crumb_idx, opcode_int, op_name))
+            continue
+
+        mctx = CONTEXT_RE.match(line)
+        if mctx:
+            ctx_idx   = int(mctx.group(1))
+            ctx_label = mctx.group(2).strip()
+            current_q["contexts"].setdefault(ctx_idx, []).append(ctx_label)
+
+    if current_q is not None:
+        result["queues"].append(current_q)
+
+    for q in result["queues"]:
+        last = q["last_completed"]
+        total = q["crumb_count"]
+        if total > 0 and last < total - 1:
+            q["incomplete"] = True
+            hang_idx = last + 1
+            q["hang_op_index"] = hang_idx
+            for (ci, op_int, op_name) in q["crumbs"]:
+                if ci == hang_idx:
+                    q["hang_op_name"] = op_name
+                    break
+            else:
+                q["hang_op_name"] = f"op at crumb index {hang_idx}"
+            for check_idx in range(hang_idx, -1, -1):
+                if check_idx in q["contexts"]:
+                    q["hang_op_context"] = q["contexts"][check_idx]
+                    break
+
+    return result
+
+
+def assess_dred(parsed_dred: dict) -> dict:
+
+    queues    = parsed_dred.get("queues", [])
+    r_code    = parsed_dred.get("removal_reason_code", "?")
+    r_name    = parsed_dred.get("removal_reason_name", "?")
+    r_desc    = parsed_dred.get("removal_reason_desc", "")
+    r_fix     = parsed_dred.get("removal_reason_fix", "")
+    pf_addr   = parsed_dred.get("page_fault_addr")
+    pf_ambig  = parsed_dred.get("page_fault_ambiguous", True)
+
+    incomplete = [q for q in queues if q["incomplete"]]
+    findings   = []
+
+    findings.append({
+        "conf":   "HIGH",
+        "title":  f"GPU {r_name} ({r_code})",
+        "detail": r_desc,
+    })
+
+    if r_fix:
+        findings.append({
+            "conf":   "HIGH",
+            "title":  "How to fix this",
+            "detail": r_fix,
+        })
+
+    if pf_addr and not pf_ambig:
+        findings.append({
+            "conf":   "HIGH",
+            "title":  f"GPU Page Fault at {pf_addr}",
+            "detail": ("The GPU attempted to access a virtual address that was not mapped or had "
+                       "been freed. This is equivalent to a CPU null-pointer dereference but on the "
+                       "GPU side. Common causes: a shader read/wrote a descriptor pointing to a "
+                       "resource that had been released, or a GPU buffer was freed while still in use."),
+        })
+    elif pf_addr and pf_ambig:
+        findings.append({
+            "conf":   "LOW",
+            "title":  "Page fault address is 0x0 (ambiguous)",
+            "detail": ("The DRED page fault address field is zero, which the format itself notes may "
+                       "mean either no page fault occurred, or a fault at address 0 (a real null GPU "
+                       "virtual address). Without additional D3D12 debug layer output this cannot be "
+                       "resolved. Focus on the breadcrumb evidence instead."),
+        })
+
+    culprit_queue = None
+    culprit_conf  = "LOW"
+    if not queues:
+        culprit_summary = (
+            "This DRED log contains no breadcrumb queue data at all - the GPU driver didn't record any "
+            "in-flight GPU commands at the time of removal. This is normal for some removal reasons "
+            "(e.g. an invalid API call, or a clean device loss) and doesn't necessarily mean anything was "
+            "stuck. The removal reason above is the main signal in this case."
+        )
+    else:
+        culprit_summary = (
+            "All recorded queues completed their work - no incomplete breadcrumbs found. "
+            "If the GPU still hung or was removed, the cause likely lies outside what DRED breadcrumbs "
+            "capture (e.g. a driver-internal issue, or a hang that occurred between recorded operations)."
+        )
+
+    if incomplete:
+        def queue_score(q):
+            op_risk    = {"HIGH": 3, "MED": 2, "LOW": 1}.get(
+                D3D12_HANG_RISK.get(q.get("hang_op_name", ""), "LOW"), 1)
+            has_ctx    = 1 if q.get("hang_op_context") else 0
+            return (op_risk * 10000 + has_ctx * 5000 + q["crumb_count"])
+
+        ranked = sorted(incomplete, key=queue_score, reverse=True)
+        culprit_queue = ranked[0]
+        hop  = culprit_queue.get("hang_op_name", "unknown op")
+        hctx = culprit_queue.get("hang_op_context", [])
+        risk = D3D12_HANG_RISK.get(hop, "LOW")
+
+        ctx_str = f" in the '{hctx[0]}' render pass" if hctx else ""
+        no_ctx_note = ""
+        if not hctx:
+            named_candidates = [q for q in incomplete if q.get("hang_op_context")]
+            if named_candidates:
+                best_named = max(named_candidates,
+                                 key=lambda q: q["crumb_count"])
+                bn_ctx = best_named["hang_op_context"][0]
+                bn_op  = best_named.get("hang_op_name", "?")
+                no_ctx_note = (
+                    f" This queue has no render-pass name attached (the engine didn't tag this "
+                    f"command list with a debug event/marker), so only the GPU operation type is "
+                    f"identifiable here. For reference, the most active NAMED incomplete queue was "
+                    f"'{bn_ctx}' (queue {best_named['index']}, {bn_op}) - it scored lower because its "
+                    f"operation type is less commonly associated with hangs, but it may still be "
+                    f"worth checking if this doesn't reproduce reliably."
+                )
+            else:
+                no_ctx_note = (
+                    " None of the incomplete queues in this log have a render-pass name attached - "
+                    "the engine didn't tag any of these command lists with debug event/marker names, "
+                    "so only the GPU operation type is identifiable, not which part of the frame it "
+                    "belongs to."
+                )
+        last_c  = culprit_queue["last_completed"]
+        total_c = culprit_queue["crumb_count"]
+
+        if risk == "HIGH" and len(incomplete) == 1:
+            culprit_conf = "HIGH"
+            culprit_summary = (
+                f"GPU hung during {hop}{ctx_str}. "
+                f"This operation type is a common hang source - it runs GPU shader code directly "
+                f"and can stall indefinitely if a shader enters an infinite loop, "
+                f"or if a fence/barrier dependency is never satisfied. "
+                f"Breadcrumbs show {last_c} of {total_c} operations completed in this queue."
+                f"{no_ctx_note}"
+            )
+        elif risk == "HIGH":
+            culprit_conf = "MED"
+            culprit_summary = (
+                f"Most likely queue: GPU hung during {hop}{ctx_str} "
+                f"({last_c}/{total_c} ops completed). "
+                f"Multiple queues were incomplete - this queue is ranked highest by operation "
+                f"type and breadcrumb count, but another queue submitting work concurrently "
+                f"may have been the root cause."
+                f"{no_ctx_note}"
+            )
+        elif risk == "MED":
+            culprit_conf = "MED"
+            culprit_summary = (
+                f"GPU appears stuck during {hop}{ctx_str} "
+                f"({last_c}/{total_c} ops completed). "
+                f"This operation type can hang if a GPU resource is in an unexpected state "
+                f"or if a previous operation left the pipeline stalled."
+                f"{no_ctx_note}"
+            )
+        else:
+            culprit_conf = "LOW"
+            culprit_summary = (
+                f"Last operation before hang: {hop}{ctx_str} "
+                f"({last_c}/{total_c} ops completed). "
+                f"This operation type is unlikely to cause a hang on its own - the real cause "
+                f"may be in an earlier operation that stalled the GPU, or in a parallel queue."
+                f"{no_ctx_note}"
+            )
+
+        findings.append({
+            "conf":   culprit_conf,
+            "title":  f"Likely hang point: {hop}{ctx_str}",
+            "detail": culprit_summary,
+        })
+
+        if hctx:
+            ctx_lower = hctx[0].lower()
+            settings_hint = None
+            if any(k in ctx_lower for k in ("raytrac", "rt_", "_rt", "dxr")):
+                settings_hint = ("Try disabling Ray Tracing in graphics settings - ray tracing shaders "
+                                 "are among the most likely to hang on driver bugs or edge-case scene data.")
+            elif "shadow" in ctx_lower or "cascade" in ctx_lower:
+                settings_hint = ("Try lowering Shadow Quality or Shadow Distance in graphics settings - "
+                                 "this won't fix the underlying bug but may avoid triggering the specific "
+                                 "shadow-map code path that hung.")
+            elif "cubemap" in ctx_lower or "reflect" in ctx_lower or "probe" in ctx_lower:
+                settings_hint = ("Try lowering Reflection Quality or disabling real-time reflections/"
+                                 "environment probes in graphics settings, since this hang happened during "
+                                 "a cubemap/reflection capture pass.")
+            elif "ssao" in ctx_lower or "ambient" in ctx_lower:
+                settings_hint = ("Try disabling Ambient Occlusion (SSAO) in graphics settings.")
+            elif "particle" in ctx_lower or "vfx" in ctx_lower:
+                settings_hint = ("Try lowering Effects/Particle Quality in graphics settings - this hang "
+                                 "happened during a particle/VFX compute pass.")
+            elif "water" in ctx_lower:
+                settings_hint = ("Try lowering Water/Ocean Quality in graphics settings.")
+            elif "dispatch" in hop.lower() or "DISPATCH" in hop:
+                settings_hint = ("This was a compute shader dispatch - if a specific graphics setting "
+                                 "correlates with this render pass name, lowering it may avoid the hang "
+                                 "as a temporary workaround.")
+
+            if settings_hint:
+                findings.append({
+                    "conf":   "MED",
+                    "title":  "Workaround to try",
+                    "detail": settings_hint + " This is a workaround, not a fix - report the render pass "
+                              "name and this DRED log to the development team so the underlying cause "
+                              "can be addressed.",
+                })
+
+        others = [q for q in ranked[1:] if q["incomplete"]]
+        if others:
+            lines_out = []
+            for q in others:
+                hop2  = q.get("hang_op_name", "?")
+                hctx2 = q.get("hang_op_context", [])
+                ctx2  = f" in '{hctx2[0]}'" if hctx2 else ""
+                lines_out.append(
+                    f"Queue {q['index']}: {hop2}{ctx2} "
+                    f"({q['last_completed']}/{q['crumb_count']} ops completed)"
+                )
+            findings.append({
+                "conf":   "LOW",
+                "title":  f"{len(others)} additional incomplete queue(s)",
+                "detail": ("These queues also had unfinished work at the time of the hang, "
+                           "suggesting multiple command lists were in flight simultaneously. "
+                           "Full list:\n" + "\n".join(lines_out)),
+            })
+
+    return {
+        "reason_code":      r_code,
+        "reason_name":      r_name,
+        "reason_desc":      r_desc,
+        "reason_fix":       r_fix,
+        "culprit_queue":    culprit_queue,
+        "culprit_conf":     culprit_conf,
+        "culprit_summary":  culprit_summary,
+        "incomplete_queues": incomplete,
+        "all_queues":       queues,
+        "page_fault_addr":  pf_addr,
+        "page_fault_ambiguous": pf_ambig,
+        "findings":         findings,
+    }
 
 
 def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
@@ -3269,10 +3768,24 @@ def get_builtin_override(pattern_id: str) -> "dict | None":
 
 def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
                            mods: dict) -> "dict | None":
+    """Return the FIRST matching custom pattern (legacy single-match behaviour).
+    Kept for any call site that only wants one result; _match_all_custom_patterns
+    below is used by the multi-signature display."""
+    all_matches = _match_all_custom_patterns(parsed, decoded_instr, mods)
+    return all_matches[0] if all_matches else None
+
+
+def _match_all_custom_patterns(parsed: dict, decoded_instr: "dict | None",
+                               mods: dict) -> list:
+    """Return EVERY custom pattern (from crash_patterns.json) whose match block
+    is satisfied by this dump, in file order. A dump can plausibly hit more than
+    one independent issue at once (e.g. a mod-related crash that also happens to
+    land on a known unsupported-renderer signature), so unlike the single-match
+    version this does not stop at the first hit."""
 
     patterns = load_custom_patterns()
     if not patterns:
-        return None
+        return []
 
     ex       = parsed.get("exception", {})
     modules  = parsed.get("modules", [])
@@ -3316,6 +3829,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
                 if "\\windows\\" not in fl and smod.lower() not in CRASH_HANDLERS:
                     active_mods.append((smod.lower(), depth))
 
+    results = []
     for p in patterns:
         m = p.get("match", {})
         try:
@@ -3329,6 +3843,22 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
                 if bool(m["is_suicide"]) != is_suicide: continue
             if "crash_mod_contains" in m:
                 if m["crash_mod_contains"].lower() not in crash_mod.lower(): continue
+            if "crash_offset" in m:
+                try:
+                    target_off = int(m["crash_offset"], 16) if isinstance(m["crash_offset"], str) else int(m["crash_offset"])
+                except Exception:
+                    continue
+                actual_off = None
+                for mm in modules:
+                    try:
+                        base = int(mm["base"], 16)
+                        if base <= ex_addr < base + mm["size"]:
+                            actual_off = ex_addr - base
+                            break
+                    except Exception:
+                        pass
+                if actual_off != target_off:
+                    continue
             if "stack_contains" in m:
                 kw         = m["stack_contains"].lower()
                 max_depth  = int(m.get("stack_contains_depth", 9999))
@@ -3343,7 +3873,7 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
         except Exception:
             continue
 
-        return {
+        results.append({
             "id":             p.get("id", "CUSTOM"),
             "name":           p.get("name", "Custom pattern"),
             "player_message": p.get("player_message", ""),
@@ -3351,8 +3881,9 @@ def _match_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             "dev_note":       p.get("dev_note", ""),
             "confidence":     p.get("confidence", "MED"),
             "is_custom":      True,
-        }
-    return None
+        })
+    return results
+
 
 def _builtin(pattern_id: str, default: dict) -> "dict | None":
 
@@ -3366,6 +3897,31 @@ def _builtin(pattern_id: str, default: dict) -> "dict | None":
         if key in override:
             merged[key] = override[key]
     return merged
+
+def _match_all_patterns(parsed: dict, decoded_instr: "dict | None",
+                        mods: dict, rootcause: list) -> list:
+    """Return every pattern (custom + the single best builtin) that matches
+    this dump, sorted by confidence (HIGH first). A dump can have more than
+    one independent issue - e.g. a mod-related crash that also happens to be
+    a known unsupported-renderer signature - so this surfaces all of them
+    rather than only the first match found.
+
+    The builtin if/elif chain in _match_patterns() is internally exclusive
+    (it returns its first hit), so we still only get ONE builtin result per
+    dump - but ALL matching custom patterns are included alongside it.
+    """
+    custom_matches = _match_all_custom_patterns(parsed, decoded_instr, mods)
+    custom_ids     = {c["id"] for c in custom_matches}
+
+    builtin = _match_patterns(parsed, decoded_instr, mods, rootcause)
+    combined = list(custom_matches)
+    if builtin and builtin["id"] not in custom_ids:
+        combined.append(builtin)
+
+    conf_rank = {"HIGH": 0, "MED": 1, "LOW": 2}
+    combined.sort(key=lambda p: conf_rank.get(p.get("confidence", "LOW"), 3))
+    return combined
+
 
 def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                     mods: dict, rootcause: list) -> "dict | None":
@@ -4023,7 +4579,8 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
 
     return None
 
-def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dict | None") -> dict:
+def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dict | None",
+                        patterns: "list | None" = None) -> dict:
 
     ex       = parsed.get("exception", {})
     modules  = parsed.get("modules", [])
@@ -4093,6 +4650,57 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         headline = f"The game crashed with error code {ex.get('code', '?')}"
     else:
         headline = "The game crashed - exception details not found in dump"
+
+    if patterns:
+        headline = patterns[0].get("name", headline)
+    elif pattern:
+        headline = pattern.get("name", headline)
+    elif mods and mods.get("has_mods") and mods.get("confidence") == "HIGH":
+        high_indicators = [i for i in mods.get("indicators", []) if i.get("severity") == "HIGH"]
+        if high_indicators:
+            kind = high_indicators[0].get("type", "mod")
+            kind_label = {
+                "proxy_dll":   "a proxy DLL commonly used to inject mods",
+                "mod_manager": "a mod manager hook",
+                "unknown_dll": "an unrecognised DLL placed in the game folder",
+            }.get(kind, "a modification")
+            headline = f"The game crashed with {kind_label} present - this is likely mod-related, not a game bug"
+    else:
+        try:
+            dll_verify = verify_critical_dlls(parsed)
+        except Exception:
+            dll_verify = {}
+        bad_dll_name  = None
+        bad_dll_verdict = None
+        m140 = dll_verify.get("msvcp140")
+        if m140 and m140.get("verdict") != "OK":
+            bad_dll_name, bad_dll_verdict = "MSVCP140.dll", m140.get("verdict")
+        if not bad_dll_name:
+            for dll_key, r in dll_verify.get("runtime", {}).items():
+                if r and r.get("verdict") != "OK":
+                    bad_dll_name, bad_dll_verdict = dll_key, r.get("verdict")
+                    break
+        if not bad_dll_name:
+            for dr in dll_verify.get("discord", []):
+                if dr.get("verdict") != "OK":
+                    bad_dll_name, bad_dll_verdict = dr.get("name", "Discord SDK DLL"), dr.get("verdict")
+                    break
+        if bad_dll_name:
+            if bad_dll_verdict == "LIKELY_TAMPERED":
+                headline = f"{bad_dll_name} appears to have been tampered with - this is likely not a game bug"
+            else:
+                headline = f"{bad_dll_name} failed authenticity verification ({bad_dll_verdict}) - this may not be a game bug"
+        else:
+            anticheat_names = ("easyanticheat", "beclient", "beservice", "battleye")
+            try:
+                crash_addr = int(ex.get("address", "0"), 16) if ex else 0
+            except Exception:
+                crash_addr = 0
+            if crash_addr:
+                crash_mod_name, _ = mod_for_addr(crash_addr)
+                if crash_mod_name and any(n in crash_mod_name.lower() for n in anticheat_names):
+                    headline = (f"The crash happened inside {crash_mod_name} (anti-cheat software), "
+                               f"not the game's own code - this may be an anti-cheat conflict rather than a game bug")
 
     crash_tid   = ex.get("thread_id") if ex else None
     active_game = []
@@ -4187,6 +4795,7 @@ def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dic
         "rootcause":         rootcause,
         "mods":              mods,
         "pattern":           pattern,
+        "patterns":          patterns if patterns is not None else ([pattern] if pattern else []),
     }
 
 _BaseWindow = TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk
@@ -4240,6 +4849,15 @@ class CrashAnalyzer(_BaseWindow):
                                    cursor="hand2")
         self._open_btn.pack(side="left")
 
+        self._open_dred_btn = tk.Button(btn_area, text="  Open GPU Log",
+                                        command=self._open_dred_file,
+                                        bg=PURPLE, fg="white",
+                                        activebackground=ACCENT2,
+                                        relief="flat", padx=14, pady=5,
+                                        font=(UI_FONT, 9, "bold"),
+                                        cursor="hand2")
+        self._open_dred_btn.pack(side="left", padx=(8, 0))
+
         tk.Frame(self, bg=ACCENT, height=2).pack(fill="x")
 
         self._file_var = tk.StringVar(value="")
@@ -4266,6 +4884,7 @@ class CrashAnalyzer(_BaseWindow):
         self._tab_summary   = self._make_tab("  Summary  ")
         self._tab_technical = self._make_tab("  Technical  ")
         self._tab_mods      = self._make_tab("  Modules & DLLs  ")
+        self._tab_gpu       = self._make_tab("  GPU Hang  ")
 
         self._simple_frame = tk.Frame(self._tab_summary, bg=BG)
         self._simple_frame.pack(fill="both", expand=True)
@@ -4305,6 +4924,10 @@ class CrashAnalyzer(_BaseWindow):
         self._dllverify_frame = tk.Frame(self._tab_dllverify, bg=BG)
         self._dllverify_frame.pack(fill="both", expand=True)
 
+        self._gpu_frame = tk.Frame(self._tab_gpu, bg=BG)
+        self._gpu_frame.pack(fill="both", expand=True)
+        self._build_gpu_placeholder()
+
         self._drop_zone = tk.Frame(self, bg=BG)
         self._drop_zone.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._build_drop_zone()
@@ -4330,6 +4953,8 @@ class CrashAnalyzer(_BaseWindow):
         self._mods_nb.add(f, text=f"  {name}  ")
         return f
 
+
+
     DEBUGGER_SCENARIOS = [
         ("Access Violation (NULL deref)",       "access_violation",   "Exceptions"),
         ("Single-Step Trap (debugger/AC)",      "single_step_trap",   "Exceptions"),
@@ -4347,6 +4972,7 @@ class CrashAnalyzer(_BaseWindow):
         ("Missing VC++ Runtime entirely",       "missing_runtime",    "Mods & DLLs"),
         ("Everything Clean (baseline-good)",    "clean_baseline",     "Baselines"),
         ("Kitchen Sink (multiple issues)",      "kitchen_sink",       "Baselines"),
+        ("Multi-Signature Match (2+ patterns)",  "multi_signature",    "Baselines"),
     ]
 
     DEBUGGER_SECTIONS = [
@@ -4645,7 +5271,6 @@ class CrashAnalyzer(_BaseWindow):
             p["exception"]["code_desc"] = "EXCEPTION_STACK_OVERFLOW"
             p["exception"]["address"]   = "0x0000000180BEEF00"
 
-
         elif scenario == "dll_init_fail":
             p["exception"]["code"]      = "0xc0000142"
             p["exception"]["code_desc"] = "STATUS_DLL_INIT_FAILED"
@@ -4757,6 +5382,9 @@ class CrashAnalyzer(_BaseWindow):
                 "checksum": "0x00126A00", "timestamp": "2023-01-01",
                 "version": "0.0.0.1",
             })
+
+        elif scenario == "multi_signature":
+            pass
 
         return p
 
@@ -4973,6 +5601,53 @@ class CrashAnalyzer(_BaseWindow):
             except Exception as e:
                 emit(f"  ✖  _match_patterns() raised: {e}", "fail")
                 failed += 1
+
+            try:
+                all_matches = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+                emit(f"  ·  _match_all_patterns() returned {len(all_matches)} match(es)", "dim")
+                check_val("_match_all_patterns returns a list", isinstance(all_matches, list), expected=True)
+                if len(all_matches) >= 2:
+                    confs = [m.get("confidence", "LOW") for m in all_matches]
+                    rank = {"HIGH": 0, "MED": 1, "LOW": 2}
+                    sorted_ok = all(rank.get(confs[i], 3) <= rank.get(confs[i+1], 3)
+                                    for i in range(len(confs) - 1))
+                    check_val("multiple matches are sorted HIGH -> MED -> LOW", sorted_ok, expected=True)
+            except Exception as e:
+                emit(f"  ✖  _match_all_patterns() raised: {e}", "fail")
+                failed += 1
+
+            if scenario == "multi_signature":
+                original_loader = load_custom_patterns
+                def _fake_loader():
+                    return [
+                        {"id": "TEST_MULTI_A", "name": "Test pattern A", "confidence": "HIGH",
+                         "player_message": "synthetic test pattern A", "fix": [], "dev_note": "",
+                         "match": {"ex_code": "0xC0000005"}, "enabled": True},
+                        {"id": "TEST_MULTI_B", "name": "Test pattern B", "confidence": "MED",
+                         "player_message": "synthetic test pattern B", "fix": [], "dev_note": "",
+                         "match": {"ex_code": "0xC0000005"}, "enabled": True},
+                    ]
+                globals()["load_custom_patterns"] = _fake_loader
+                try:
+                    injected = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+                    ids_found = [m["id"] for m in injected]
+                    emit(f"  ·  Injected 2 synthetic patterns - found: {ids_found}", "dim")
+                    check_val("both injected patterns were matched",
+                              "TEST_MULTI_A" in ids_found and "TEST_MULTI_B" in ids_found,
+                              expected=True)
+                    check_val("injected patterns sorted HIGH before MED",
+                              ids_found.index("TEST_MULTI_A") < ids_found.index("TEST_MULTI_B")
+                              if "TEST_MULTI_A" in ids_found and "TEST_MULTI_B" in ids_found
+                              else False,
+                              expected=True)
+                    check_val("at least 2 patterns returned with injection active",
+                              injected, min_len=2)
+                except Exception as e:
+                    emit(f"  ✖  multi-signature injection test raised: {e}", "fail")
+                    failed += 1
+                finally:
+                    globals()["load_custom_patterns"] = original_loader
+
             emit("")
 
         if section_on("mods"):
@@ -5130,7 +5805,10 @@ class CrashAnalyzer(_BaseWindow):
             hints      = quick_patterns(parsed)
             rootcause  = assess_root_cause(parsed)
             mods       = detect_mods(parsed)
-            plain      = build_plain_english(parsed, rootcause, mods, None)
+            decoded_instr = None
+            pattern      = _match_patterns(parsed, decoded_instr, mods, rootcause)
+            all_patterns = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+            plain        = build_plain_english(parsed, rootcause, mods, pattern, all_patterns)
 
             self._file_var.set(f"[DEBUG]  Synthetic scenario: {scenario}")
             self._file_bar.pack(fill="x")
@@ -5208,13 +5886,25 @@ class CrashAnalyzer(_BaseWindow):
                   relief="flat", padx=20, pady=6,
                   font=(UI_FONT, 9, "bold"), cursor="hand2").pack()
 
+        tk.Label(centre, text="or", bg=BG, fg=BORDER,
+                 font=(UI_FONT, 9)).pack(pady=(4, 4))
+        tk.Button(centre, text="  Open GPU Log  (DRED .txt)",
+                  command=self._open_dred_file,
+                  bg=PURPLE, fg="white", activebackground=ACCENT2,
+                  relief="flat", padx=16, pady=6,
+                  font=(UI_FONT, 9, "bold"), cursor="hand2").pack()
+
         if _DND_AVAILABLE:
             def _on_drop(event):
                 raw = event.data
                 paths = self.tk.splitlist(raw)
                 for p in paths:
-                    if p.lower().endswith((".dmp", ".mdmp")):
+                    pl = p.lower()
+                    if pl.endswith((".dmp", ".mdmp")):
                         self._load_path(p)
+                        break
+                    if pl.endswith("_dred.txt") or pl.endswith(".dred.txt"):
+                        self._load_dred_path(p)
                         break
 
             try:
@@ -5262,6 +5952,202 @@ class CrashAnalyzer(_BaseWindow):
         frame.pack(fill="both", expand=True, padx=8, pady=8)
         return frame
 
+    def _build_gpu_placeholder(self):
+        """Show a placeholder in the GPU Hang tab when no DRED log is loaded."""
+        for w in self._gpu_frame.winfo_children():
+            w.destroy()
+        centre = tk.Frame(self._gpu_frame, bg=BG)
+        centre.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(centre, text="GPU", bg=BG, fg=ACCENT,
+                 font=(UI_FONT, 36, "bold")).pack()
+        tk.Label(centre, text="No GPU log loaded",
+                 bg=BG, fg=TEXT_DIM, font=(UI_FONT, 13)).pack(pady=(4, 2))
+        tk.Label(centre, text="Click  Open GPU Log  to open a DRED .txt log from Helldivers 2",
+                 bg=BG, fg=TEXT_DIM, font=(UI_FONT, 9)).pack()
+        tk.Button(centre, text="  Open GPU Log",
+                  command=self._open_dred_file,
+                  bg=PURPLE, fg="white", activebackground=ACCENT2,
+                  relief="flat", padx=20, pady=8,
+                  font=(UI_FONT, 10, "bold"), cursor="hand2").pack(pady=24)
+
+    def _open_dred_file(self):
+        path = filedialog.askopenfilename(
+            title="Open GPU DRED Log",
+            filetypes=[("DRED log files", ("*_dred.txt", "*.dred.txt")), ("Text files", "*.txt"), ("All files", "*.*")],
+        )
+        if path:
+            self._load_dred_path(path)
+
+    def _load_dred_path(self, path: str):
+        self._status(f"Parsing {PureWindowsPath(path).name} ...", busy=True)
+        self.update()
+        try:
+            parsed_dred = parse_dred_log(path)
+            verdict     = assess_dred(parsed_dred)
+            self._file_var.set(f"GPU Log: {path}")
+            self._file_bar.pack(fill="x")
+            self._drop_zone.place_forget()
+            self._display_dred(parsed_dred, verdict)
+            self._nb.select(self._tab_gpu)
+            self._status(f"GPU log loaded - {parsed_dred.get('removal_reason_name', '?')}", busy=False)
+        except Exception as e:
+            import traceback
+            messagebox.showerror("Parse Error", f"Failed to parse GPU log:\n{e}\n\n{traceback.format_exc()[-800:]}")
+            self._status("GPU log parse failed", busy=False)
+
+    def _display_dred(self, parsed_dred: dict, verdict: dict):
+        """Render DRED analysis results in the GPU Hang tab."""
+        for w in self._gpu_frame.winfo_children():
+            w.destroy()
+
+        r_code = verdict.get("reason_code", "?")
+        r_name = verdict.get("reason_name", "?")
+        conf   = verdict.get("culprit_conf", "LOW")
+        CONF_COLOUR = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}
+
+        hdr = tk.Frame(self._gpu_frame, bg=BG2, padx=20, pady=12)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="GPU Hang Analysis", bg=BG2, fg=ACCENT,
+                 font=(UI_FONT, 12, "bold")).pack(side="left")
+        tk.Label(hdr, text=f"  {r_name}  ({r_code})", bg=BG2, fg=TEXT_DIM,
+                 font=(UI_FONT, 9)).pack(side="left")
+        conf_lbl = tk.Label(hdr, text=f"  {conf} CONFIDENCE",
+                            bg=BG2, fg=CONF_COLOUR.get(conf, TEXT_DIM),
+                            font=(UI_FONT, 9, "bold"))
+        conf_lbl.pack(side="right")
+        tk.Frame(self._gpu_frame, bg=ACCENT, height=2).pack(fill="x")
+
+        outer = tk.Frame(self._gpu_frame, bg=BG)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        sb     = tk.Scrollbar(outer, orient="vertical", command=canvas.yview,
+                              bg=BG2, relief="flat")
+        inner  = tk.Frame(canvas, bg=BG)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self._bind_scroll(canvas)
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def card(parent, title, body, colour=TEXT_DIM, conf_badge=None):
+            f = tk.Frame(parent, bg=BG2, padx=20, pady=14)
+            f.pack(fill="x", padx=16, pady=(0, 8))
+            hrow = tk.Frame(f, bg=BG2)
+            hrow.pack(fill="x")
+            if conf_badge:
+                badge_col = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}.get(conf_badge, TEXT_DIM)
+                tk.Label(hrow, text=f"[{conf_badge}]", bg=BG2, fg=badge_col,
+                         font=(UI_MONO, 8, "bold")).pack(side="left", padx=(0, 8))
+            tk.Label(hrow, text=title, bg=BG2, fg=colour,
+                     font=(UI_FONT, 10, "bold"), wraplength=800,
+                     justify="left", anchor="w").pack(side="left", fill="x", expand=True)
+            tk.Label(f, text=body, bg=BG2, fg=TEXT,
+                     font=(UI_FONT, 9), wraplength=820,
+                     justify="left", anchor="w").pack(fill="x", pady=(6, 0))
+
+        tk.Label(inner, text="Findings", bg=BG, fg=TEXT_DIM,
+                 font=(UI_FONT, 8, "bold"), anchor="w").pack(
+                     fill="x", padx=16, pady=(12, 4))
+
+        CONF_COL = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}
+        for finding in verdict.get("findings", []):
+            fc   = finding.get("conf", "LOW")
+            card(inner,
+                 finding.get("title", ""),
+                 finding.get("detail", ""),
+                 colour=CONF_COL.get(fc, TEXT_DIM),
+                 conf_badge=fc)
+
+        cq = verdict.get("culprit_queue")
+        if cq:
+            tk.Label(inner, text="Culprit Queue - Breadcrumb Trace",
+                     bg=BG, fg=TEXT_DIM,
+                     font=(UI_FONT, 8, "bold"), anchor="w").pack(
+                         fill="x", padx=16, pady=(16, 4))
+
+            bc_frame = tk.Frame(inner, bg=BG2, padx=16, pady=12)
+            bc_frame.pack(fill="x", padx=16, pady=(0, 8))
+
+            last = cq["last_completed"]
+            crumbs = cq.get("crumbs", [])
+            contexts = cq.get("contexts", {})
+
+            hang_idx = cq.get("hang_op_index")
+            window_start = max(0, (hang_idx or 0) - 4)
+
+            txt = self._make_text(bc_frame, UI_MONO, 8)
+            txt.pack(fill="both", expand=True)
+            txt.configure(state="normal", height=min(20, len(crumbs) + 4))
+            txt.tag_configure("done",  foreground=GREEN)
+            txt.tag_configure("stuck", foreground=RED, font=(UI_MONO, 8, "bold"))
+            txt.tag_configure("ctx",   foreground=ACCENT2)
+            txt.tag_configure("dim",   foreground=TEXT_DIM)
+
+            txt.insert("end", f"Last completed crumb index: {last}  |  Total crumbs: {cq['crumb_count']}\n\n", "dim")
+
+            shown = [c for c in crumbs if c[0] >= window_start]
+            if window_start > 0:
+                txt.insert("end", f"  ... ({window_start} earlier operations completed OK) ...\n", "dim")
+
+            for (ci, op_int, op_name) in shown:
+                ctx_labels = contexts.get(ci, [])
+                ctx_str    = f"  [{', '.join(ctx_labels)}]" if ctx_labels else ""
+                if ci < last:
+                    txt.insert("end", f"  [{ci:4}]  {op_name}{ctx_str}\n", "done")
+                elif ci == last:
+                    txt.insert("end", f"  [{ci:4}]  {op_name}{ctx_str}  <- last completed\n", "done")
+                elif ci == hang_idx:
+                    txt.insert("end", f"  [{ci:4}]  {op_name}{ctx_str}  <- GPU HUNG HERE\n", "stuck")
+                else:
+                    txt.insert("end", f"  [{ci:4}]  {op_name}{ctx_str}  (issued, not completed)\n", "dim")
+
+            txt.configure(state="disabled")
+
+        tk.Label(inner, text="All Command Queues",
+                 bg=BG, fg=TEXT_DIM,
+                 font=(UI_FONT, 8, "bold"), anchor="w").pack(
+                     fill="x", padx=16, pady=(16, 4))
+
+        q_frame = tk.Frame(inner, bg=BG2, padx=16, pady=12)
+        q_frame.pack(fill="x", padx=16, pady=(0, 16))
+
+        all_queues = parsed_dred.get("queues", [])
+        if not all_queues:
+            tk.Label(q_frame, text="No breadcrumb queue data in this log - the driver didn't "
+                     "record any in-flight GPU commands at the time of removal.",
+                     bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 9),
+                     wraplength=800, justify="left", anchor="w").pack(fill="x")
+        else:
+            q_txt = self._make_text(q_frame, UI_MONO, 8)
+            q_txt.pack(fill="both", expand=True)
+            q_txt.configure(state="normal", height=min(30, len(all_queues) + 2))
+            q_txt.tag_configure("incomplete", foreground=YELLOW)
+            q_txt.tag_configure("ok",         foreground=GREEN)
+            q_txt.tag_configure("dim",        foreground=TEXT_DIM)
+            q_txt.tag_configure("head",       foreground=ACCENT2, font=(UI_MONO, 8, "bold"))
+
+            q_txt.insert("end",
+                         f"  {'#':>3}  {'Status':10}  {'Completed':>11}  {'Total':>7}  Last Op / Hang Point\n",
+                         "head")
+            q_txt.insert("end", "  " + "-" * 75 + "\n", "dim")
+
+            for q in all_queues:
+                is_c = q["incomplete"]
+                hop  = q.get("hang_op_name") or "-"
+                ctx  = q.get("hang_op_context", [])
+                ctx_s = f"  [{ctx[0]}]" if ctx else ""
+                last_s = str(q["last_completed"])
+                tot_s  = str(q["crumb_count"])
+                status = "INCOMPLETE" if is_c else "OK"
+                tag    = "incomplete" if is_c else "ok"
+                q_txt.insert("end",
+                             f"  {q['index']:>3}  {status:10}  {last_s:>11}  {tot_s:>7}  {hop}{ctx_s}\n",
+                             tag)
+
+            q_txt.configure(state="disabled")
+
     def _open_file(self):
         path = filedialog.askopenfilename(
             title="Select minidump file",
@@ -5273,6 +6159,9 @@ class CrashAnalyzer(_BaseWindow):
 
     def _load_path(self, path: str):
         """Central entry point for loading a dump - called by browse and drag-drop."""
+        self._load_generation = getattr(self, "_load_generation", 0) + 1
+        my_generation = self._load_generation
+
         self._file_var.set(path)
         self._file_bar.pack(fill="x", after=self.winfo_children()[1])
         self._drop_zone.place_forget()
@@ -5298,11 +6187,20 @@ class CrashAnalyzer(_BaseWindow):
 
                 mods       = detect_mods(parsed)
                 pattern    = _match_patterns(parsed, decoded_instr, mods, rootcause)
-                plain      = build_plain_english(parsed, rootcause, mods, pattern)
-                self.after(0, lambda: self._display_results(parsed, summary, hints, rootcause, plain, mods))
+                all_patterns = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+                plain      = build_plain_english(parsed, rootcause, mods, pattern, all_patterns)
+
+                def _maybe_display():
+                    if getattr(self, "_load_generation", 0) == my_generation:
+                        self._display_results(parsed, summary, hints, rootcause, plain, mods)
+
+                self.after(0, _maybe_display)
             except Exception as e:
-                self.after(0, lambda e=e: self._status(f"Parse error: {e}", busy=False))
-                self.after(0, lambda: self._open_btn.config(state="normal"))
+                def _maybe_show_error():
+                    if getattr(self, "_load_generation", 0) == my_generation:
+                        self._status(f"Parse error: {e}", busy=False)
+                        self._open_btn.config(state="normal")
+                self.after(0, _maybe_show_error)
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -5754,33 +6652,38 @@ class CrashAnalyzer(_BaseWindow):
                      font=(font_family, font_size, "bold" if bold else "normal"),
                      wraplength=wrap, justify="left", anchor="w").pack(anchor="w", pady=1)
 
-        pattern = plain.get("pattern")
+        all_patterns = plain.get("patterns") or ([plain.get("pattern")] if plain.get("pattern") else [])
         section("Crash identification", ACCENT)
-        if pattern:
-            conf_colour = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}.get(
-                pattern.get("confidence", "LOW"), TEXT_DIM)
-            pc = card(inner, "#1f0d0d" if pattern.get("confidence") == "HIGH" else BG3)
-            badge_f = tk.Frame(pc, bg=pc["bg"])
-            badge_f.pack(fill="x", pady=(0, 6))
-            tk.Label(badge_f, text="  ⚠ KNOWN CRASH PATTERN  ",
-                     bg=conf_colour, fg="white",
-                     font=("Consolas", 8, "bold"), padx=6, pady=2).pack(side="left")
-            tk.Label(badge_f, text=f"  [{pattern.get('confidence', '?')} CONFIDENCE]",
-                     bg=pc["bg"], fg=conf_colour,
-                     font=("Consolas", 8, "bold")).pack(side="left", padx=6)
-            label(pc, pattern["name"], fg=conf_colour, font_size=12, bold=True)
-            label(pc, pattern["player_message"], fg=TEXT, font_size=10)
-            tk.Frame(pc, bg=BORDER, height=1).pack(fill="x", pady=6)
-            tk.Label(pc, text="What to try:", bg=pc["bg"], fg=ACCENT,
-                     font=("Consolas", 8, "bold")).pack(anchor="w")
-            for i, step in enumerate(pattern.get("fix", []), 1):
-                sf = tk.Frame(pc, bg=pc["bg"])
-                sf.pack(fill="x", pady=1)
-                tk.Label(sf, text=f"{i}.", bg=pc["bg"], fg=conf_colour,
-                         font=("Consolas", 9, "bold"), width=3).pack(side="left")
-                tk.Label(sf, text=step, bg=pc["bg"], fg=TEXT,
-                         font=("Consolas", 9), wraplength=820,
-                         justify="left", anchor="w").pack(side="left")
+        if all_patterns:
+            if len(all_patterns) > 1:
+                tk.Label(inner, text=f"{len(all_patterns)} possible issues detected - listed by confidence",
+                         bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8, "italic"),
+                         anchor="w").pack(fill="x", padx=4, pady=(0, 6))
+            for pattern in all_patterns:
+                conf_colour = {"HIGH": RED, "MED": YELLOW, "LOW": TEXT_DIM}.get(
+                    pattern.get("confidence", "LOW"), TEXT_DIM)
+                pc = card(inner, "#1f0d0d" if pattern.get("confidence") == "HIGH" else BG3)
+                badge_f = tk.Frame(pc, bg=pc["bg"])
+                badge_f.pack(fill="x", pady=(0, 6))
+                tk.Label(badge_f, text="  ⚠ KNOWN CRASH PATTERN  ",
+                         bg=conf_colour, fg="white",
+                         font=("Consolas", 8, "bold"), padx=6, pady=2).pack(side="left")
+                tk.Label(badge_f, text=f"  [{pattern.get('confidence', '?')} CONFIDENCE]",
+                         bg=pc["bg"], fg=conf_colour,
+                         font=("Consolas", 8, "bold")).pack(side="left", padx=6)
+                label(pc, pattern["name"], fg=conf_colour, font_size=12, bold=True)
+                label(pc, pattern["player_message"], fg=TEXT, font_size=10)
+                tk.Frame(pc, bg=BORDER, height=1).pack(fill="x", pady=6)
+                tk.Label(pc, text="What to try:", bg=pc["bg"], fg=ACCENT,
+                         font=("Consolas", 8, "bold")).pack(anchor="w")
+                for i, step in enumerate(pattern.get("fix", []), 1):
+                    sf = tk.Frame(pc, bg=pc["bg"])
+                    sf.pack(fill="x", pady=1)
+                    tk.Label(sf, text=f"{i}.", bg=pc["bg"], fg=conf_colour,
+                             font=("Consolas", 9, "bold"), width=3).pack(side="left")
+                    tk.Label(sf, text=step, bg=pc["bg"], fg=TEXT,
+                             font=("Consolas", 9), wraplength=820,
+                             justify="left", anchor="w").pack(side="left")
         else:
             pc = card(inner, BG3)
             label(pc, "No known pattern matched for this crash.",
