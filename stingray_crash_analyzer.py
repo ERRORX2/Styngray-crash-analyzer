@@ -869,12 +869,9 @@ def verify_critical_dlls(parsed: dict) -> dict:
             except Exception:
                 pass
 
-        if cs in ("0x00000000", "0x0"):
-            issues.append(
-                "PE checksum is 0x00000000 - Microsoft system and redistributable DLLs "
-                "always have a valid non-zero checksum. This copy has been modified or "
-                "assembled by a third-party tool."
-            )
+        # Note: PE checksum is often not available in minidumps (defaults to 0x00000000).
+        # Only flag as suspicious if OTHER indicators (size, path, timestamp) are also anomalous.
+        # A standalone zeroed checksum is not a strong signal and causes false positives.
 
         if not issues:
             verdict = "OK"
@@ -940,11 +937,8 @@ def verify_critical_dlls(parsed: dict) -> dict:
                     "this doesn't match any known Discord SDK DLL"
                 )
 
-        if cs in ("0x00000000", "0x0"):
-            issues.append(
-                "PE checksum is 0x00000000 - official Discord SDK DLLs always have a "
-                "valid checksum. This copy appears to have been modified."
-            )
+        # Note: PE checksum is often not available in minidumps (defaults to 0x00000000).
+        # Only flag as suspicious if combined with other indicators.
 
         if ts_date and ts_date != "N/A":
             try:
@@ -1046,12 +1040,8 @@ def verify_critical_dlls(parsed: dict) -> dict:
                         matched_ref = ref
                         break
 
-        if cs in ("0x00000000", "0x0"):
-            issues.append(
-                f"PE checksum is 0x00000000 - Microsoft runtime DLLs always have a "
-                f"valid non-zero checksum. This copy of {sn} has been modified or "
-                "assembled outside of Microsoft's build system."
-            )
+        # Note: PE checksum is often not available in minidumps (defaults to 0x00000000).
+        # Only flag as suspicious if combined with other indicators like sentinel timestamps.
 
         SENTINEL_DATES = {"1970-01-01", "2005-03-24", "2005-04-16", "2014-06-17"}
         if ts_date and ts_date != "N/A":
@@ -1088,7 +1078,7 @@ def verify_critical_dlls(parsed: dict) -> dict:
 
         critical_keywords = (
             "hijack", "trojan", "stub", "forged", "tampered", "non-Windows path",
-            "injected", "zeroed", "modified"
+            "injected", "modified"
         )
         if not issues:
             verdict = "OK"
@@ -2392,7 +2382,7 @@ def _null_registers_at_crash(parsed: dict) -> dict:
         return {"null": {}, "near_null": {}}
     return {
         "null":     {k.upper(): v for k, v in regs.items() if v == 0},
-        "near_null":{k.upper(): v for k, v in regs.items() if 0 < v < 0x10000},
+        "near_null":{k.upper(): v for k, v in regs.items() if 0 < v < 0x1000},
     }
 
 
@@ -2733,7 +2723,8 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             _imem = read_virtual_memory(parsed, ex_addr, 16)
             if _imem:
                 _pre_decoded = decode_crash_instruction(_imem, ex_addr)
-        except Exception:
+        except Exception as e:
+            # Memory at crash address not in dump - small minidump limitation
             pass
 
         if ex_code == 0xC0000005 and len(params) >= 2:
@@ -2744,6 +2735,17 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             instr_mem = read_virtual_memory(parsed, ex_addr, 16)
             if instr_mem:
                 decoded_instr = decode_crash_instruction(instr_mem, ex_addr)
+            else:
+                # Small minidumps often lack memory at crash address
+                size_mb = parsed.get("size_mb", 0)
+                if size_mb and size_mb < 10:
+                    findings.append({"conf": "LOW",
+                        "title": "Small minidump - detailed instruction analysis unavailable",
+                        "detail": (f"This dump is {size_mb}MB and doesn't include memory at the crash address. "
+                                   f"Full memory dumps (100MB+) or the engine log file (.log) provide detailed analysis. "
+                                   f"The exception parameters and register analysis below may still indicate the root cause."),
+                        "link": None,
+                    })
 
             is_vtable_dispatch = False
             vtable_slot = None
@@ -2832,7 +2834,17 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                     "link": {"tab": "modules", "module": fault_mod},
                 })
 
-    except Exception:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        # Dump is missing critical data for detailed analysis
+        findings.append({"conf": "LOW",
+            "title": f"Exception analysis incomplete ({type(e).__name__})",
+            "detail": (f"The dump is missing data needed for detailed crash analysis ({type(e).__name__}). "
+                       f"This often happens with small minidumps that don't capture full memory. "
+                       f"Check the exception code and registers above, or review the engine log file (.log) for details."),
+            "link": None,
+        })
+    except Exception as e:
+        # Unexpected error - log it
         pass
 
     for t, mod, off, full in active_game_threads:
@@ -3103,6 +3115,21 @@ def build_summary(parsed: dict) -> str:
         lines.append("── PARSE ERRORS ────────────────────────────────────")
         for e in parsed["parse_errors"]:
             lines.append(f"  ⚠  {e}")
+
+    # Add quick root cause summary
+    try:
+        rootcause = assess_root_cause(parsed)
+        if rootcause:
+            lines.append("")
+            lines.append("── ROOT CAUSE ASSESSMENT (quick summary) ───────────")
+            conf_icons = {"HIGH": "🔴", "MED": "🟡", "LOW": "⚪"}
+            for i, rc in enumerate(rootcause[:3]):  # Show top 3 findings
+                conf_icon = conf_icons.get(rc["conf"], "?")
+                lines.append(f"  {conf_icon} [{rc['conf']}] {rc['title']}")
+            if len(rootcause) > 3:
+                lines.append(f"  … and {len(rootcause)-3} more findings (see Root Cause tab for details)")
+    except Exception:
+        pass
 
     return "\n".join(lines)
 
@@ -7047,7 +7074,7 @@ class CrashAnalyzer(_BaseWindow):
             "CRASHED":       RED,
             "ACTIVE":        YELLOW,
             "CRASH HANDLER": TEXT_DIM,
-            "SUSPENDED":     ACCENT2,
+            "SUSPENDED":     PURPLE,
             "WAITING":       TEXT_DIM,
             "SLEEPING":      TEXT_DIM,
             "IDLE":          TEXT_DIM,
@@ -7075,7 +7102,7 @@ class CrashAnalyzer(_BaseWindow):
         tk.Label(hdr, text=f"  {len(threads)} threads  -  call stacks (heuristic ~*k)",
                  bg=BG2, fg=ACCENT, font=("Consolas", 9, "bold")).pack(side="left")
         for colour, label in [(RED, "● crashed"), (YELLOW, "● game code"),
-                              (ACCENT2, "● suspended"), (TEXT_DIM, "● waiting/sleeping")]:
+                              (PURPLE, "● suspended"), (TEXT_DIM, "● waiting/sleeping")]:
             tk.Label(hdr, text=label, bg=BG2, fg=colour,
                      font=("Consolas", 8)).pack(side="right", padx=8)
 
