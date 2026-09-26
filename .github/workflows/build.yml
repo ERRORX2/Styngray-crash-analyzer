@@ -49,6 +49,7 @@ jobs:
             --name "StingrayAnalyzer" `
             --icon "assets\icon.ico" `
             --add-data "assets;assets" `
+            --add-data "crash_patterns.json;." `
             stingray_crash_analyzer.py
 
           if (-not (Test-Path "dist\StingrayAnalyzer.exe")) {
@@ -103,7 +104,7 @@ jobs:
       - name: Create Release ZIP
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}" -replace "refs/tags/", ""
+          $tag = "${{ github.ref_name }}"
           $zip = "release_$tag.zip"
 
           Compress-Archive `
@@ -135,6 +136,9 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+
+          token: ${{ secrets.PAT_README || secrets.GITHUB_TOKEN }}
 
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -145,56 +149,102 @@ jobs:
       - name: Update README
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}" -replace "refs/tags/", ""
-          $date = Get-Date -Format "yyyy-MM-dd"
-          $zip = "release_$tag.zip"
+          if (-not (Test-Path README.md)) {
+            Write-Host "README.md not found — skipping update."
+            exit 0
+          }
 
-          $exeHash      = Get-Content "artifact\sha256\exe.sha256"
-          $jsonHash     = Get-Content "artifact\sha256\patterns.sha256"
-          $manifestHash = Get-Content "artifact\sha256\manifest.sha256"
-          $zipHash      = Get-Content "artifact\sha256\zip.sha256"
+          $tag     = "${{ github.ref_name }}"
+          $date    = Get-Date -Format "yyyy-MM-dd"
+          $zipName = "release_$tag.zip"
+          $repoUrl = "https://github.com/${{ github.repository }}"
 
-          $start = "<!-- LATEST_RELEASE_START -->"
-          $end   = "<!-- LATEST_RELEASE_END -->"
+          $exeHash      = (Get-Content "artifact\sha256\exe.sha256").Trim()
+          $jsonHash     = (Get-Content "artifact\sha256\patterns.sha256").Trim()
+          $manifestHash = (Get-Content "artifact\sha256\manifest.sha256").Trim()
+          $zipHash      = (Get-Content "artifact\sha256\zip.sha256").Trim()
 
-          $block = @"
-          $start
-          ### 🚀 Latest Windows Release: $tag ($date)
-
-          - Download: [release_$zip](https://github.com/${{ github.repository }}/releases/download/$tag/$zip)
-
-          ### 🔐 Integrity
-
-          <details>
-
-          <summary>Cryptographic Hashes</summary>
-
-          * EXE SHA256: ``$exeHash``
-          * Groups JSON SHA256: ``$jsonHash``
-          * Manifest SHA256: ``$manifestHash``
-          * ZIP SHA256: ``$zipHash``
-
-          </details>
-          $end
-          "@
+          $lines = @(
+            "<!-- LATEST_RELEASE_START -->",
+            "### Latest Release: $tag ($date)",
+            "",
+            "- Download: [$zipName]($repoUrl/releases/download/$tag/$zipName)",
+            "- All releases: [releases]($repoUrl/releases)",
+            "",
+            "### Cryptographic Integrity",
+            "",
+            "<details>",
+            "<summary>SHA-256 Hashes</summary>",
+            "",
+            "| File | SHA-256 |",
+            "|---|---|",
+            "| ``StingrayAnalyzer.exe`` | ``$exeHash`` |",
+            "| ``crash_patterns.json`` | ``$jsonHash`` |",
+            "| ``manifest.json`` | ``$manifestHash`` |",
+            "| ``$zipName`` | ``$zipHash`` |",
+            "",
+            "</details>",
+            "<!-- LATEST_RELEASE_END -->"
+          )
+          $block = $lines -join "`n"
 
           $readme = Get-Content README.md -Raw -Encoding utf8
 
-          if ($readme -match "(?s)$start.*?$end") {
-            $readme = $readme -replace "(?s)$start.*?$end", $block
+
+          $pattern = "(?ms)^<!-- LATEST_RELEASE_START -->.*?^<!-- LATEST_RELEASE_END -->"
+
+          if ($readme -match $pattern) {
+            $readme = [regex]::Replace($readme, $pattern, { param($m) $block })
           } else {
-            $readme = $readme + "`n" + $block
+            if (-not $readme.EndsWith("`n")) { $readme += "`n" }
+            $readme += "`n" + $block + "`n"
           }
 
-          Set-Content README.md $readme -Encoding utf8
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText((Resolve-Path README.md).Path, $readme, $utf8NoBom)
 
       - name: Commit README
         shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
+          git diff --quiet README.md
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "README.md unchanged — nothing to commit."
+            exit 0
+          }
+
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add README.md
-          git commit -m "docs: update release ${{ github.ref_name }}" || exit 0
-          git pull --rebase origin master
-          git push origin HEAD:master
+          git commit -m "docs: update release ${{ github.ref_name }}"
+
+          $rebased = $false
+          try {
+            git pull --rebase origin master
+            if ($LASTEXITCODE -eq 0) { $rebased = $true }
+          } catch {
+            Write-Host "Rebase threw — falling back to merge."
+          }
+          if (-not $rebased) {
+            Write-Host "Rebase failed — aborting and retrying as merge."
+            git rebase --abort 2>$null
+            git pull --no-rebase origin master 2>$null
+            git add README.md
+            git commit -m "docs: update release ${{ github.ref_name }} (merge)" 2>$null
+          }
+
+          $pushed = $false
+          for ($i = 1; $i -le 3; $i++) {
+            git push origin HEAD:master 2>&1 | Out-Host
+            if ($LASTEXITCODE -eq 0) {
+              $pushed = $true
+              break
+            }
+            Write-Host "Push attempt $i failed — pulling and retrying."
+            git pull --rebase origin master 2>$null
+          }
+
+          if (-not $pushed) {
+            Write-Host "::warning::Failed to push README update after 3 attempts. The release is published; the README will update on the next release."
+            exit 0
+          }
