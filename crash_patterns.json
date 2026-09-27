@@ -1,15 +1,18 @@
 {
-  "_comment": "Stingray Crash Analyzer - crash pattern library. Edit builtin_patterns to customize built-in patterns. Add new patterns to patterns[].",
+  "_comment": "Stingray Crash Analyzer - crash pattern library. Edit builtin_patterns to customize built-in patterns. Add new patterns to patterns[]. Note: LUA_MOD_DETECTED is generated dynamically by the code (tier-based confidence) and is not available for JSON override.",
   "_format": {
     "id": "Unique identifier - must match what the code expects for builtin patterns",
     "name": "Short crash name shown in the UI",
     "player_message": "Plain-English explanation for players (no jargon)",
-    "fix": [ "Step 1", "Step 2", "Step 3" ],
+    "fix": [
+      "Step 1",
+      "Step 2",
+      "Step 3"
+    ],
     "dev_note": "Technical note for developers",
     "confidence": "HIGH / MED / LOW",
     "enabled": "true to enable, false to disable"
   },
-
   "builtin_patterns": [
     {
       "id": "SUICIDE_DSTORAGE",
@@ -161,7 +164,6 @@
       "enabled": true
     }
   ],
-
   "patterns": [
     {
       "id": "EXAMPLE_PATTERN",

@@ -41,6 +41,12 @@ def resource_path(*parts: str) -> Path:
     return base / Path(*parts)
 
 
+LUA_TYPE_ID_SIGNATURE = bytes([
+    0xE2, 0x17, 0xD1, 0x2C, 0xFA, 0x8D, 0x4E, 0xA1,
+])
+LUA_PATCH_OFFSET = 0x50
+LUA_PATCH_FILENAME_RE = re.compile(r'\.patch_', re.IGNORECASE)
+
 
 DXGI_REMOVAL_REASONS = {
     "0x887A0005": ("DXGI_ERROR_DEVICE_REMOVED",
@@ -575,7 +581,7 @@ def parse_minidump(path: str) -> dict:
             nmod = struct.unpack_from("<I", data, srva)[0]
             moff = srva + 4
             MODULE_ENTRY_SIZE = 108
-            for m in range(min(nmod, 256)):
+            for m in range(min(nmod, 1024)):
                 eoff = moff + m * MODULE_ENTRY_SIZE
                 if eoff + MODULE_ENTRY_SIZE > len(data):
                     break
@@ -1609,7 +1615,7 @@ def analyse_threads(parsed: dict) -> list:
             state = "CRASH HANDLER"
         elif real_suspend > 0:
             state = f"SUSPENDED (count={real_suspend})"
-        elif wait_label == "NtDelayExecution" or wait_label and "sleeping" in wait_label.lower():
+        elif wait_label == "NtDelayExecution" or (wait_detail and "sleeping" in wait_detail.lower()):
             state = "SLEEPING"
         elif wait_label and "idle" in wait_detail.lower() if wait_detail else False:
             state = "IDLE"
@@ -2217,8 +2223,8 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
         "d3d12sdklayers.dll": "D3D12 debug/validation layer",
     }
     DXGI_ERRORS = {
-        0x887A0005: ("DXGI_ERROR_DEVICE_HUNG",    "GPU stopped responding - driver TDR or infinite shader loop"),
-        0x887A0006: ("DXGI_ERROR_DEVICE_REMOVED",  "GPU device was removed - driver crash, overheat, or hardware fault"),
+        0x887A0005: ("DXGI_ERROR_DEVICE_REMOVED",  "GPU device was removed - driver crash, overheat, or hardware fault"),
+        0x887A0006: ("DXGI_ERROR_DEVICE_HUNG",    "GPU stopped responding - driver TDR or infinite shader loop"),
         0x887A0007: ("DXGI_ERROR_DEVICE_RESET",    "GPU was reset by the driver - likely TDR recovery"),
         0x887A0020: ("DXGI_ERROR_DRIVER_INTERNAL_ERROR", "Internal driver error - update or reinstall GPU drivers"),
         0x80004005: ("E_FAIL in D3D context",      "Generic D3D failure - bad draw call, invalid resource, or OOM"),
@@ -2768,13 +2774,13 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         if not is_sys and not is_handler:
             active_game_threads.append((t, mod, off, full))
 
+    fault_addr   = None
+    _pre_decoded = None
     try:
         ex_code = int(ex.get("code", "0"), 16)
         params  = ex.get("params", [])
         ex_addr = int(ex.get("address", "0"), 16)
 
-        fault_addr   = None
-        _pre_decoded = None
         try:
             _imem = read_virtual_memory(parsed, ex_addr, 16)
             if _imem:
@@ -3591,6 +3597,8 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
                 disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]; idx += 1
             elif mod == 2 and idx + 4 <= len(b):
                 disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
+            elif mod == 0 and rm == 5 and idx + 4 <= len(b):
+                disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
 
             if disp > 0:
                 operand = f"[{base_str}+0x{disp:X}]"
@@ -3674,6 +3682,8 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             if mod == 1 and idx < len(b):
                 disp = struct.unpack_from("<b", bytes(b[idx:idx+1]))[0]; idx += 1
             elif mod == 2 and idx + 4 <= len(b):
+                disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
+            elif mod == 0 and rm == 5 and idx + 4 <= len(b):
                 disp = struct.unpack_from("<i", bytes(b[idx:idx+4]))[0]; idx += 4
 
             if disp > 0:
@@ -3865,6 +3875,133 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
         "confidence": "LOW",
     }
 
+MINIDUMP_WITH_DATA_SEGS = 0x1
+MINIDUMP_WITH_FULL_MEMORY = 0x2
+MINIDUMP_WITH_INDIRECTLY_REFERENCED = 0x40
+
+
+def _lua_signature_checkable(parsed: dict) -> "tuple[bool, str]":
+    flags = int(parsed.get("raw_flags") or 0)
+    if flags & MINIDUMP_WITH_FULL_MEMORY:
+        return True, "MiniDumpWithFullMemory - full process address space captured, signature verification possible"
+    if flags & MINIDUMP_WITH_DATA_SEGS:
+        return True, "MiniDumpWithDataSegs - module data segments captured, signature verification may be possible"
+    if flags & MINIDUMP_WITH_INDIRECTLY_REFERENCED:
+        return False, "MiniDumpWithIndirectlyReferencedMemory - only pointer-reachable pages captured, signature likely not verifiable"
+    flags_hex = f"0x{flags:X}" if flags else "0x0 (MiniDumpNormal)"
+    return False, f"Dump flags = {flags_hex} - no full-memory/data-seg capture, signature verification not possible"
+
+
+def _detect_lua_mods(parsed: dict) -> list:
+    results = []
+    modules = parsed.get("modules", [])
+    sig_checkable, sig_reason = _lua_signature_checkable(parsed)
+
+    for m in modules:
+        name = m.get("name", "")
+        nl = name.lower().replace("/", "\\")
+        sn = PureWindowsPath(name).name
+        if not LUA_PATCH_FILENAME_RE.search(sn):
+            continue
+        if "\\data\\" not in nl:
+            continue
+        try:
+            base = int(m["base"], 16)
+        except Exception:
+            continue
+
+        if sig_checkable:
+            sig_bytes = read_virtual_memory(parsed, base + LUA_PATCH_OFFSET, 8)
+            if sig_bytes is None or len(sig_bytes) < 8:
+                results.append({
+                    "path": name,
+                    "base": m.get("base", "?"),
+                    "size": m.get("size", 0),
+                    "signature_offset": LUA_PATCH_OFFSET,
+                    "signature_matched": None,
+                    "source": "module_list",
+                    "confirmed": False,
+                    "tier": "suspected",
+                    "reason": f"Path matches .patch_* in \\data\\ but memory at base+0x{LUA_PATCH_OFFSET:X} not in dump - {sig_reason}",
+                })
+                continue
+            if sig_bytes == LUA_TYPE_ID_SIGNATURE:
+                results.append({
+                    "path": name,
+                    "base": m.get("base", "?"),
+                    "size": m.get("size", 0),
+                    "signature_offset": LUA_PATCH_OFFSET,
+                    "signature_matched": LUA_TYPE_ID_SIGNATURE.hex(),
+                    "source": "module_list",
+                    "confirmed": True,
+                    "tier": "confirmed",
+                    "reason": f"Path matches AND MurMur64('lua') signature verified at offset 0x{LUA_PATCH_OFFSET:X}",
+                })
+            else:
+                pass
+        else:
+            results.append({
+                "path": name,
+                "base": m.get("base", "?"),
+                "size": m.get("size", 0),
+                "signature_offset": LUA_PATCH_OFFSET,
+                "signature_matched": None,
+                "source": "module_list",
+                "confirmed": False,
+                "tier": "suspected",
+                "reason": f"Path matches .patch_* in \\data\\ but signature unconfirmable - {sig_reason}",
+            })
+
+    if not results and sig_checkable:
+        results = _scan_memory_for_lua_signature(parsed)
+
+    return results
+
+
+def _scan_memory_for_lua_signature(parsed: dict) -> list:
+    results = []
+    raw = parsed.get("_raw_bytes")
+    if raw is None:
+        raw_path = parsed.get("_raw_path")
+        if not raw_path:
+            return results
+        try:
+            with open(raw_path, "rb") as f:
+                raw = f.read()
+            parsed["_raw_bytes"] = raw
+        except Exception:
+            return results
+
+    memory_map = parsed.get("memory_map", [])
+    if not memory_map:
+        return results
+
+    sig = LUA_TYPE_ID_SIGNATURE
+    min_range_size = LUA_PATCH_OFFSET + len(sig)
+
+    for start, msize, rva in memory_map:
+        if msize < min_range_size:
+            continue
+
+        if rva + LUA_PATCH_OFFSET + len(sig) > len(raw):
+            continue
+
+        chunk_at_offset = raw[rva + LUA_PATCH_OFFSET : rva + LUA_PATCH_OFFSET + len(sig)]
+        if chunk_at_offset == sig:
+            results.append({
+                "path": f"<memory-mapped at 0x{start:X}>",
+                "base": f"0x{start:X}",
+                "size": msize,
+                "signature_offset": LUA_PATCH_OFFSET,
+                "signature_matched": sig.hex(),
+                "source": "memory_scan",
+                "confirmed": True,
+                "tier": "confirmed",
+                "reason": f"MurMur64('lua') signature found at offset 0x{LUA_PATCH_OFFSET:X} in memory range (no module-list path match)",
+            })
+
+    return results
+
 def detect_mods(parsed: dict) -> dict:
 
     modules = parsed.get("modules", [])
@@ -4040,7 +4177,7 @@ def detect_mods(parsed: dict) -> dict:
         sn    = PureWindowsPath(name).name
         snl   = sn.lower()
 
-        is_safe = any(
+        is_safe_path = any(
             (p.startswith("\\") and p in nl) or
             nl.startswith(p)
             for p in SAFE_PREFIXES
@@ -4049,12 +4186,33 @@ def detect_mods(parsed: dict) -> dict:
         is_plugin = "\\plugins\\" in nl
 
         is_exe = PureWindowsPath(name).suffix.lower() == ".exe"
-        if not is_safe and not is_known_dll and not is_plugin and not is_exe:
+        if is_exe:
+            pass
+        elif is_known_dll:
+            pass
+        elif is_plugin:
+            pass
+        elif not is_safe_path:
             indicators.append({
                 "type":   "unknown_dll",
                 "path":   name,
                 "detail": f"DLL loaded from unexpected location: {name}",
             })
+        else:
+            in_bin_folder = "\\bin\\" in nl or "\\binaries\\" in nl
+            in_data_folder = "\\data\\" in nl
+            is_patch_file = bool(LUA_PATCH_FILENAME_RE.search(sn))
+            if (in_bin_folder or in_data_folder) and not is_patch_file:
+                indicators.append({
+                    "type":   "unknown_dll",
+                    "path":   name,
+                    "detail": (
+                        f"Unknown DLL in game folder: {sn} "
+                        f"(loaded from {name}) - this DLL is not in the known game DLL list. "
+                        f"It may be a mod, proxy, or injected DLL. If you didn't install it, "
+                        f"verify game files through Steam."
+                    ),
+                })
 
         _proxy_name = name.replace("\\", "/").split("/")[-1].lower()
         if _proxy_name in PROXY_SYSTEM_DLLS:
@@ -4069,7 +4227,7 @@ def detect_mods(parsed: dict) -> dict:
 
         for sig, label in MOD_MANAGER_PATHS.items():
             if sig in nl:
-                if sig == "dinput8.dll" and is_safe:
+                if sig == "dinput8.dll" and is_safe_path:
                     continue
                 detail = f"{label}: {name}" if label else f"Possible mod hook via {sn}: {name}"
                 indicators.append({
@@ -4085,6 +4243,27 @@ def detect_mods(parsed: dict) -> dict:
                 "detail": f"File loaded from AppData (possible mod config): {name}",
             })
 
+    lua_mods = _detect_lua_mods(parsed)
+    for lm in lua_mods:
+        tier = lm.get("tier", "suspected")
+        if tier == "confirmed":
+            detail = (
+                f"Lua mod patch file CONFIRMED: {PureWindowsPath(lm['path']).name} "
+                f"in data folder - MurMur64('lua') signature verified at offset 0x{LUA_PATCH_OFFSET:X}"
+            )
+        else:
+            detail = (
+                f"Lua mod patch file SUSPECTED: {PureWindowsPath(lm['path']).name} "
+                f"matches .patch_* naming in \\data\\ folder, but signature could not be verified "
+                f"(dump does not contain the file's memory). Reason: {lm.get('reason', 'unknown')}"
+            )
+        indicators.append({
+            "type":   "lua_mod",
+            "path":   lm["path"],
+            "detail": detail,
+            "tier":   tier,
+        })
+
     seen = set()
     unique = []
     for ind in indicators:
@@ -4098,21 +4277,26 @@ def detect_mods(parsed: dict) -> dict:
         "proxy_dll":   "HIGH",
         "mod_manager": "HIGH",
         "unknown_dll": "HIGH",
+        "lua_mod":     "HIGH",
         "appdata_mod": "MED",
     }
-    severities = [SEVERITY.get(i["type"], "LOW") for i in unique]
+    for ind in unique:
+        if ind["type"] == "lua_mod" and ind.get("tier") == "suspected":
+            ind["severity"] = "MED"
+        else:
+            ind["severity"] = SEVERITY.get(ind["type"], "LOW")
+
+    severities = [ind["severity"] for ind in unique]
     confidence = ("HIGH" if "HIGH" in severities else
                   "MED"  if "MED"  in severities else
                   "LOW"  if severities else "LOW")
-
-    for ind in unique:
-        ind["severity"] = SEVERITY.get(ind["type"], "LOW")
 
     return {
         "has_mods":   has_mods,
         "confidence": confidence,
         "game_root":  game_root,
         "indicators": unique,
+        "lua_mods":   lua_mods,
     }
 
 PATTERN_FILE = resource_path("crash_patterns.json")
@@ -4239,6 +4423,9 @@ def _match_all_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             if "active_thread_mod_contains" in m:
                 kw = m["active_thread_mod_contains"].lower()
                 if not any(kw in mod for mod, _ in active_mods): continue
+            if "lua_mod_present" in m:
+                lua_detected = bool(mods.get("lua_mods"))
+                if bool(m["lua_mod_present"]) != lua_detected: continue
         except Exception:
             continue
 
@@ -4424,396 +4611,71 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
         if stingray_suicide:
             is_suicide = True
 
-    if is_suicide:
-        active = build_active_subsystems()
+    if mods.get("lua_mods"):
+        lua_mods = mods["lua_mods"]
+        lua_files = [PureWindowsPath(lm["path"]).name for lm in lua_mods]
+        lua_list = ", ".join(lua_files[:3])
+        any_confirmed = any(lm.get("tier") == "confirmed" for lm in lua_mods)
+        all_suspected = all(lm.get("tier") == "suspected" for lm in lua_mods)
 
-        conf, evidence = subsystem_match(active, ["dstorage", "dstoragecore"])
-        if conf:
-            return _builtin("SUICIDE_DSTORAGE", {
-                "id": "SUICIDE_DSTORAGE",
-                "name": "Engine suicide during DirectStorage streaming",
-                "player_message": (
-                    "The game detected an internal error while loading assets via DirectStorage "
-                    "and shut itself down. This is often caused by outdated GPU drivers that "
-                    "don't properly support DirectStorage."
-                ),
-                "fix": [
-                    "Update your GPU drivers to the latest version",
-                    "If on AMD: use DDU (Display Driver Uninstaller) to fully clean old drivers first",
-                    "Verify game files through Steam",
-                    "If the crash persists, disable DirectStorage in game settings if available",
-                ],
-                "dev_note": f"Engine suicide with DirectStorage on active stack ({evidence}) - likely DS decompression or IO error",
-                "confidence": conf,
-            })
+        if any_confirmed:
+            confidence = "HIGH"
+            tier_label = "CONFIRMED"
+            dev_note = (
+                f"Lua mod patch files CONFIRMED via MurMur64('lua') signature at offset 0x{LUA_PATCH_OFFSET:X}: "
+                f"{lua_list}. "
+                f"Signature bytes: {LUA_TYPE_ID_SIGNATURE.hex()}. "
+                "These are Stingray .patch_* files in the data\\ folder - they contain "
+                "compiled Lua bytecode injected by mod loaders. HIGH confidence. "
+                f"Note: crash was classified as {'suicide' if is_suicide else 'non-suicide'}, "
+                "but Lua mod detection takes priority - mods can cause engine suicides by "
+                "corrupting Lua state, and the user should remove mods before this is treated "
+                "as an engine bug."
+            )
+        elif all_suspected:
+            confidence = "MED"
+            tier_label = "SUSPECTED"
+            _, sig_reason = _lua_signature_checkable(parsed)
+            dev_note = (
+                f"Lua mod patch files SUSPECTED by path match (.patch_* in \\data\\): {lua_list}. "
+                f"Signature UNCONFIRMABLE - {sig_reason}. "
+                f"The dump does not contain the file's memory pages, so the MurMur64('lua') "
+                f"signature at offset 0x{LUA_PATCH_OFFSET:X} could not be verified. "
+                f"Path match is a strong indicator but not cryptographic proof. "
+                f"Note: crash was classified as {'suicide' if is_suicide else 'non-suicide'}, "
+                "but Lua mod detection takes priority - asking the user to confirm whether "
+                "they have Lua mods installed is recommended before treating this as an engine bug."
+            )
+        else:
+            confidence = "MED"
+            tier_label = "MIXED"
+            dev_note = (
+                f"Lua mod patch files detected (mixed confirmation): {lua_list}. "
+                f"See lua_mods list in detect_mods() output for per-file confirmation status. "
+                f"Note: crash was classified as {'suicide' if is_suicide else 'non-suicide'}, "
+                "but Lua mod detection takes priority."
+            )
 
-        conf, evidence = subsystem_match(active, ["lua"])
-        if conf:
-            return _builtin("SUICIDE_LUA", {
-                "id": "SUICIDE_LUA",
-                "name": "Engine suicide from Lua scripting error",
-                "player_message": (
-                    "The game detected a scripting error and shut itself down. "
-                    "This can be caused by mods that modify game scripts, or a bug in a game update."
-                ),
-                "fix": [
-                    "If you have mods installed, remove them and try again",
-                    "Verify game files through Steam",
-                    "Check the game log file for a Lua error message",
-                ],
-                "dev_note": f"Engine suicide with Lua on active stack ({evidence}) - check Lua stack and recent script changes",
-                "confidence": conf,
-            })
-
-        gpu_present = any(any(frag in s for frag in GPU_DRIVER_FRAGMENTS) for s in active)
-        d3d12core_present = any("d3d12core" in s for s in active)
-        conf, evidence = subsystem_match(active, [], known_names=AUDIO_ENGINE_DLLS)
-        if conf and not gpu_present and not d3d12core_present:
-            return _builtin("SUICIDE_AUDIO", {
-                "id": "SUICIDE_AUDIO",
-                "name": "Engine suicide during audio playback",
-                "player_message": (
-                    "The game detected an error in the audio system and shut itself down. "
-                    "This can happen with certain audio devices or driver configurations."
-                ),
-                "fix": [
-                    "Try setting your audio output to stereo instead of surround sound",
-                    "Update your audio drivers",
-                    "Try disabling audio enhancements in Windows sound settings",
-                    "Check the game log for audio error messages",
-                ],
-                "dev_note": f"Engine suicide with Wwise/audio on active stack ({evidence}) - check audio event / bank loading",
-                "confidence": conf,
-            })
-
-        if gpu_present:
-            gpu_mod = next((s for s in active if any(frag in s for frag in GPU_DRIVER_FRAGMENTS)), "GPU driver")
-            gpu_info = active.get(gpu_mod, {"min_depth": 999, "hits": 0, "source": "unknown"})
-            if gpu_info["source"] == "crash_chain" and gpu_info["min_depth"] <= 4:
-                gpu_conf = "HIGH"
-            elif gpu_info["source"] == "crash_chain":
-                gpu_conf = "MED"
-            else:
-                gpu_conf = "LOW"
-            return _builtin("SUICIDE_GPU", {
-                "id": "SUICIDE_GPU",
-                "name": "Engine suicide during GPU rendering",
-                "player_message": (
-                    "The game detected an error in the graphics system and shut itself down. "
-                    "This is most commonly caused by outdated or unstable GPU drivers, "
-                    "or a GPU hardware issue."
-                ),
-                "fix": [
-                    "Update your GPU drivers to the latest version",
-                    "If overclocking your GPU, revert to stock settings",
-                    "Try lowering graphics settings, especially ray tracing",
-                    "Check GPU temperature - overheating can cause this",
-                ],
-                "dev_note": f"Engine suicide with GPU driver ({gpu_mod}, depth {gpu_info['min_depth']}, {gpu_info['hits']}x) on active stack - device lost or driver timeout",
-                "confidence": gpu_conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["network", "enet", "raknet"])
-        if conf:
-            return _builtin("SUICIDE_NETWORK", {
-                "id":   "SUICIDE_NETWORK",
-                "name": "Engine suicide during network operation",
-                "player_message": (
-                    "The game detected a network error and shut itself down. "
-                    "This can happen during connection drops, host migration, "
-                    "or if the game server sends unexpected data."
-                ),
-                "fix": [
-                    "Check your internet connection stability",
-                    "Try a wired connection instead of Wi-Fi",
-                    "Check the game log for network error messages",
-                    "Try again - intermittent network issues often resolve themselves",
-                ],
-                "dev_note": f"Engine suicide with network on active stack ({evidence}) - packet error or RPC on dead object",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["physx", "physics", "nvphys"])
-        if conf:
-            return _builtin("SUICIDE_PHYSICS", {
-                "id":   "SUICIDE_PHYSICS",
-                "name": "Engine suicide during physics simulation",
-                "player_message": (
-                    "The game detected a physics simulation error and shut itself down. "
-                    "This can happen with unusual in-game configurations or collisions."
-                ),
-                "fix": [
-                    "Check the game log for physics error messages",
-                    "Verify game files through Steam",
-                    "Note what was happening in-game (large explosion? ragdoll?)",
-                ],
-                "dev_note": f"Engine suicide with PhysX on active stack ({evidence}) - NaN transform or destroyed actor",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["savegame", "save_game", "gamesave"])
-        if conf:
-            return _builtin("SUICIDE_SAVEGAME", {
-                "id":   "SUICIDE_SAVEGAME",
-                "name": "Engine suicide during save/load operation",
-                "player_message": (
-                    "The game detected an error while saving or loading and shut itself down. "
-                    "This can happen with corrupted save data, version mismatches, or "
-                    "async save operations completing after level unload."
-                ),
-                "fix": [
-                    "Check if your save file is corrupted - try loading an earlier save",
-                    "Verify game files through Steam",
-                    "Check the game log for save/load error messages",
-                    "If the crash happens on load, the save file may be from an incompatible game version",
-                ],
-                "dev_note": f"Engine suicide with savegame on active stack ({evidence}) - save version mismatch or async save after unload",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["level", "streaming", "world"])
-        if conf:
-            return _builtin("SUICIDE_LEVEL_STREAMING", {
-                "id":   "SUICIDE_LEVEL_STREAMING",
-                "name": "Engine suicide during level streaming",
-                "player_message": (
-                    "The game detected an error while streaming level data and shut itself down. "
-                    "This can happen when a level fails to load, or objects in an unloading level "
-                    "are still being accessed."
-                ),
-                "fix": [
-                    "Verify game files through Steam - the level data may be corrupted",
-                    "Check the game log for streaming/load errors",
-                    "Note which level or area you were entering when it crashed",
-                    "Try lowering texture/streaming settings if available",
-                ],
-                "dev_note": f"Engine suicide with level/streaming on active stack ({evidence}) - level unload race or missing level data",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["anim", "skeleton", "blend"])
-        if conf:
-            return _builtin("SUICIDE_ANIMATION", {
-                "id":   "SUICIDE_ANIMATION",
-                "name": "Engine suicide during animation update",
-                "player_message": (
-                    "The game detected an error in the animation system and shut itself down. "
-                    "This can happen with mismatched skeletons, deleted animation states, "
-                    "or bone index out of range."
-                ),
-                "fix": [
-                    "Check the game log for animation error messages",
-                    "Verify game files through Steam",
-                    "Note what your character was doing when it crashed (loading screen? combat?)",
-                ],
-                "dev_note": f"Engine suicide with animation on active stack ({evidence}) - mismatched skeleton or deleted anim state",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["hud", "widget", "scaleform"], known_names=UI_DLLS)
-        if conf:
-            return _builtin("SUICIDE_UI", {
-                "id":   "SUICIDE_UI",
-                "name": "Engine suicide during UI/HUD update",
-                "player_message": (
-                    "The game detected an error in the UI system and shut itself down. "
-                    "This can happen when a UI widget accesses a destroyed entity, or "
-                    "a font/texture atlas is not loaded when the HUD draws."
-                ),
-                "fix": [
-                    "Check the game log for UI/HUD error messages",
-                    "Verify game files through Steam",
-                    "Note what was on screen when it crashed (menu? HUD element?)",
-                ],
-                "dev_note": f"Engine suicide with UI/HUD on active stack ({evidence}) - widget accessing destroyed entity or missing atlas",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["entity", "unit"])
-        if conf:
-            return _builtin("SUICIDE_ENTITY", {
-                "id":   "SUICIDE_ENTITY",
-                "name": "Engine suicide during entity/unit update",
-                "player_message": (
-                    "The game detected an error in the entity system and shut itself down. "
-                    "This can happen when a component is accessed on a destroyed entity, "
-                    "or an entity ID is reused before all references were cleared."
-                ),
-                "fix": [
-                    "Check the game log for entity/unit error messages",
-                    "Verify game files through Steam",
-                    "Note what was happening in-game (spawning? mission event? enemy death?)",
-                ],
-                "dev_note": f"Engine suicide with entity/unit on active stack ({evidence}) - use-after-free or stale entity ID",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["resource", "package", "bundle"])
-        if conf:
-            return _builtin("SUICIDE_RESOURCE", {
-                "id":   "SUICIDE_RESOURCE",
-                "name": "Engine suicide during resource loading",
-                "player_message": (
-                    "The game detected an error while loading a resource (texture, model, sound) "
-                    "and shut itself down. This is often caused by corrupted or missing game files."
-                ),
-                "fix": [
-                    "Verify game files through Steam - a resource file may be corrupted or missing",
-                    "Check the game log for resource loading errors",
-                    "Note which level or area you were entering when it crashed",
-                    "If modded, remove mods that replace game assets",
-                ],
-                "dev_note": f"Engine suicide with resource_manager/package on active stack ({evidence}) - corrupted or missing resource",
-                "confidence": conf,
-            })
-
-        conf, evidence = subsystem_match(active, ["shader", "dxcompiler", "d3dcompiler"])
-        if conf:
-            return _builtin("SUICIDE_SHADER", {
-                "id":   "SUICIDE_SHADER",
-                "name": "Engine suicide during shader compilation",
-                "player_message": (
-                    "The game detected an error during shader compilation and shut itself down. "
-                    "This is usually caused by outdated GPU drivers that don't support the "
-                    "required shader model."
-                ),
-                "fix": [
-                    "Update your GPU drivers to the latest version",
-                    "If on a very old GPU, it may not support the required shader model",
-                    "Check the game log for shader compilation errors",
-                    "Try lowering graphics settings, especially shader-heavy features",
-                ],
-                "dev_note": f"Engine suicide with shader/dxcompiler on active stack ({evidence}) - shader permutation compile failure",
-                "confidence": conf,
-            })
-
-        return _builtin("SUICIDE_GENERIC", {
-            "id": "SUICIDE_GENERIC",
-            "name": "Engine detected an internal error and shut down",
+        return _builtin("LUA_MOD_DETECTED", {
+            "id":   "LUA_MOD_DETECTED",
+            "name": f"Lua mod patch files {tier_label} ({lua_list})",
             "player_message": (
-                "The game detected something unexpected internally and safely shut itself down "
-                "rather than continuing in a broken state. The engine log file contains "
-                "the actual error message."
+                f"{'Confirmed' if any_confirmed else 'Suspected'} Lua mod patch files in your game's data folder: {lua_list}. "
+                "These files are created by Lua-based mod loaders (commonly used for "
+                "Helldivers 2 gameplay mods). They override or inject Lua scripts into "
+                "the game engine, which can cause crashes - especially after game updates "
+                "that change the Lua API or script structure."
+                + ("" if any_confirmed else " The signature could not be cryptographically verified from this dump, but the file path strongly suggests a Lua mod is installed.")
+                + " Even though this crash looks like an engine suicide, Lua mods can cause suicides by corrupting Lua state - please remove mods and retest before reporting this as a game bug."
             ),
             "fix": [
-                "Enable logging with Steam launch option --log-to-file, then check %APPDATA%\\Arrowhead\\Helldivers 2\\logs for the engine log",
-                "Verify game files through Steam",
-                "Share the .log AND .dmp files with the 418th",
+                "Remove all Lua mod patch files from the game's data folder and verify the crash still happens",
+                "If using a mod loader (e.g., HD2 Lua Mod Loader), disable it and retest",
+                "If the crash goes away, the Lua mod is the cause - check for an updated mod version",
+                "If it still crashes without mods, share the new dump with the dev team",
             ],
-            "dev_note": "Generic engine suicide - no subsystem matched in crash chain. Check engine log for trigger.",
-            "confidence": "MED",
-        })
-
-    _has_nvidia = any("nvwgf" in m or "nvgpucomp" in m or "nvd3d" in m
-                      for m in all_mods.split())
-    _has_intel_igpu = any("igd10um" in m or "igc64" in m or "igdgmm" in m
-                          for m in all_mods.split())
-
-    if crash_mod and any(frag in crash_mod_l for frag in GPU_DRIVER_FRAGMENTS):
-        if (_has_nvidia and _has_intel_igpu
-                and ex_code == 0xC0000005
-                and not is_suicide):
-            return _builtin("DUAL_GPU_DRIVER_CRASH", {
-                "id":   "DUAL_GPU_DRIVER_CRASH",
-                "name": "GPU driver crash on dual-GPU system (NVIDIA + Intel iGPU)",
-                "player_message": (
-                    "Your system has both an NVIDIA dedicated GPU and an Intel integrated GPU. "
-                    "The game crashed inside a GPU driver. On dual-GPU systems this is often "
-                    "caused by the game running on the wrong GPU, or a conflict between the two drivers."
-                ),
-                "fix": [
-                    "Open NVIDIA Control Panel -> Manage 3D Settings -> Program Settings "
-                    "-> add Helldivers 2 -> set preferred GPU to your NVIDIA card",
-                    "Update both your NVIDIA and Intel GPU drivers",
-                    "In Windows Display Settings, set the NVIDIA card as the primary GPU",
-                    "If on a laptop, disable the Intel iGPU in Device Manager and test",
-                    "Update your NVIDIA drivers - use DDU for a clean install if issues persist",
-                ],
-                "dev_note": (
-                    "Crash in GPU driver DLL on dual-GPU system (NVIDIA + Intel iGPU both loaded). "
-                    "Check which adapter D3D12 is selecting at runtime - possible iGPU fallback."
-                ),
-                "confidence": "HIGH",
-            })
-
-        vendor = "AMD"    if any(k in crash_mod_l for k in ("amd", "ati")) else \
-                 "NVIDIA" if any(k in crash_mod_l for k in ("nvwgf", "nvd3d", "nvgpucomp", "nvldumdx", "nvppex")) else \
-                 "Intel"
-        return _builtin("GPU_DRIVER_CRASH", {
-            "id":   "GPU_DRIVER_CRASH",
-            "name": f"{vendor} GPU driver crashed",
-            "player_message": (
-                f"The {vendor} graphics driver crashed inside the game. "
-                f"This is almost always a driver bug or hardware issue, not a game bug."
-            ),
-            "fix": [
-                f"Update your {vendor} GPU drivers to the latest version",
-                "Use DDU (Display Driver Uninstaller) to fully clean old drivers first",
-                "If overclocking your GPU or VRAM, revert to stock settings",
-                "Check GPU temperature under load",
-                "If on a laptop, make sure the game is using the dedicated GPU, not the integrated one",
-            ],
-            "dev_note": f"Crash address inside {crash_mod} - GPU driver fault, not engine code",
-            "confidence": "HIGH",
-        })
-
-    if ex_code in (0x887A0005, 0x887A0006, 0x887A0007, 0x887A0020):
-        DXGI_NAMES = {
-            0x887A0005: "GPU stopped responding (TDR)",
-            0x887A0006: "GPU device removed",
-            0x887A0007: "GPU device reset",
-            0x887A0020: "GPU driver internal error",
-        }
-        return _builtin("DXGI_DEVICE_LOST", {
-            "id":   "DXGI_DEVICE_LOST",
-            "name": f"GPU error: {DXGI_NAMES.get(ex_code, 'DXGI error')}",
-            "player_message": (
-                "The GPU stopped responding to the game. This is almost always a driver, "
-                "hardware, or overheating issue - not a game bug."
-            ),
-            "fix": [
-                "Update GPU drivers",
-                "Check GPU temperature - use HWiNFO64 or GPU-Z while gaming",
-                "Revert any GPU overclock",
-                "If the problem persists, run a GPU stress test (FurMark) to check hardware stability",
-            ],
-            "dev_note": f"DXGI error {ex_code:#x} - TDR or device lost",
-            "confidence": "HIGH",
-        })
-
-    if ex_code == 0xC00000FD:
-        return _builtin("STACK_OVERFLOW", {
-            "id":   "STACK_OVERFLOW",
-            "name": "Stack overflow",
-            "player_message": (
-                "The game ran out of call stack space. This is a game bug, not a hardware issue. "
-                "It typically means a function called itself too many times in a loop."
-            ),
-            "fix": [
-                "This is a game bug - please report it with the dump file",
-                "Note exactly what you were doing in-game when it crashed",
-                "Check if it happens consistently in the same situation",
-            ],
-            "dev_note": "Stack overflow - look for infinite recursion in the crashing thread",
-            "confidence": "HIGH",
-        })
-
-    if ex_code == 0xC0000374:
-        return _builtin("HEAP_CORRUPTION", {
-            "id":   "HEAP_CORRUPTION",
-            "name": "Memory corruption detected",
-            "player_message": (
-                "The game detected that its memory was corrupted. "
-                "This is a game bug. It can be hard to reproduce consistently "
-                "because the corruption may happen before the crash."
-            ),
-            "fix": [
-                "This is a game bug - please report it with the dump file",
-                "Note what you were doing when it crashed - especially any unusual sequences of actions",
-                "If you have mods, try without them first",
-            ],
-            "dev_note": "Heap corruption - use heap debug allocator to find the stomper",
-            "confidence": "HIGH",
+            "dev_note": dev_note,
+            "confidence": confidence,
         })
 
     _PROXY_NAMES_SET = {"dxgi.dll","d3d12.dll","d3d11.dll","d3d10.dll","d3d9.dll",
@@ -4944,14 +4806,130 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                 "Mods were detected in this crash. Mods can cause crashes that "
                 "wouldn't otherwise occur. Before reporting this as a game bug, "
                 "please verify the crash happens without mods installed."
+                + (" Even though this crash looks like an engine suicide, mods can cause suicides - please remove mods and retest." if is_suicide else "")
             ),
             "fix": [
                 "Remove all mods and verify the crash still happens",
                 "If the crash goes away without mods, the mod is the cause",
                 "If it still crashes without mods, please share the new dump with the 418th",
             ],
-            "dev_note": "Mods detected with HIGH confidence - verify crash is reproducible in vanilla",
+            "dev_note": (
+                "Mods detected with HIGH confidence - verify crash is reproducible in vanilla. "
+                f"Crash was classified as {'suicide' if is_suicide else 'non-suicide'}, but "
+                "mod detection takes priority - mods can cause engine suicides."
+            ),
             "confidence": "MED",
+        })
+
+    if crash_mod and any(frag in crash_mod_l for frag in GPU_DRIVER_FRAGMENTS):
+        _has_nvidia    = any("nvwgf" in m or "nvgpucomp" in m or "nvd3d" in m
+                             for m in all_mods.split())
+        _has_intel_igpu = any("igd10um" in m or "igc64" in m or "igdgmm" in m
+                              for m in all_mods.split())
+        if (_has_nvidia and _has_intel_igpu
+                and ex_code == 0xC0000005
+                and not is_suicide):
+            return _builtin("DUAL_GPU_DRIVER_CRASH", {
+                "id":   "DUAL_GPU_DRIVER_CRASH",
+                "name": "GPU driver crash on dual-GPU system (NVIDIA + Intel iGPU)",
+                "player_message": (
+                    "Your system has both an NVIDIA dedicated GPU and an Intel integrated GPU. "
+                    "The game crashed inside a GPU driver. On dual-GPU systems this is often "
+                    "caused by the game running on the wrong GPU, or a conflict between the two drivers."
+                ),
+                "fix": [
+                    "Open NVIDIA Control Panel -> Manage 3D Settings -> Program Settings "
+                    "-> add Helldivers 2 -> set preferred GPU to your NVIDIA card",
+                    "Update both your NVIDIA and Intel GPU drivers",
+                    "In Windows Display Settings, set the NVIDIA card as the primary GPU",
+                    "If on a laptop, disable the Intel iGPU in Device Manager and test",
+                    "Update your NVIDIA drivers - use DDU for a clean install if issues persist",
+                ],
+                "dev_note": (
+                    "Crash in GPU driver DLL on dual-GPU system (NVIDIA + Intel iGPU both loaded). "
+                    "Check which adapter D3D12 is selecting at runtime - possible iGPU fallback."
+                ),
+                "confidence": "HIGH",
+            })
+
+        vendor = "AMD"    if any(k in crash_mod_l for k in ("amd", "ati")) else \
+                 "NVIDIA" if any(k in crash_mod_l for k in ("nvwgf", "nvd3d", "nvgpucomp", "nvldumdx", "nvppex")) else \
+                 "Intel"
+        return _builtin("GPU_DRIVER_CRASH", {
+            "id":   "GPU_DRIVER_CRASH",
+            "name": f"{vendor} GPU driver crashed",
+            "player_message": (
+                f"The {vendor} graphics driver crashed inside the game. "
+                f"This is almost always a driver bug or hardware issue, not a game bug."
+            ),
+            "fix": [
+                f"Update your {vendor} GPU drivers to the latest version",
+                "Use DDU (Display Driver Uninstaller) to fully clean old drivers first",
+                "If overclocking your GPU or VRAM, revert to stock settings",
+                "Check GPU temperature under load",
+                "If on a laptop, make sure the game is using the dedicated GPU, not the integrated one",
+            ],
+            "dev_note": f"Crash address inside {crash_mod} - GPU driver fault, not engine code",
+            "confidence": "HIGH",
+        })
+
+    if ex_code in (0x887A0005, 0x887A0006, 0x887A0007, 0x887A0020):
+        DXGI_NAMES = {
+            0x887A0005: "GPU device removed",
+            0x887A0006: "GPU stopped responding (TDR)",
+            0x887A0007: "GPU device reset",
+            0x887A0020: "GPU driver internal error",
+        }
+        return _builtin("DXGI_DEVICE_LOST", {
+            "id":   "DXGI_DEVICE_LOST",
+            "name": f"GPU error: {DXGI_NAMES.get(ex_code, 'DXGI error')}",
+            "player_message": (
+                "The GPU stopped responding to the game. This is almost always a driver, "
+                "hardware, or overheating issue - not a game bug."
+            ),
+            "fix": [
+                "Update GPU drivers",
+                "Check GPU temperature - use HWiNFO64 or GPU-Z while gaming",
+                "Revert any GPU overclock",
+                "If the problem persists, run a GPU stress test (FurMark) to check hardware stability",
+            ],
+            "dev_note": f"DXGI error {ex_code:#x} - TDR or device lost",
+            "confidence": "HIGH",
+        })
+
+    if ex_code == 0xC00000FD:
+        return _builtin("STACK_OVERFLOW", {
+            "id":   "STACK_OVERFLOW",
+            "name": "Stack overflow",
+            "player_message": (
+                "The game ran out of call stack space. This is a game bug, not a hardware issue. "
+                "It typically means a function called itself too many times in a loop."
+            ),
+            "fix": [
+                "This is a game bug - please report it with the dump file",
+                "Note exactly what you were doing in-game when it crashed",
+                "Check if it happens consistently in the same situation",
+            ],
+            "dev_note": "Stack overflow - look for infinite recursion in the crashing thread",
+            "confidence": "HIGH",
+        })
+
+    if ex_code == 0xC0000374:
+        return _builtin("HEAP_CORRUPTION", {
+            "id":   "HEAP_CORRUPTION",
+            "name": "Memory corruption detected",
+            "player_message": (
+                "The game detected that its memory was corrupted. "
+                "This is a game bug. It can be hard to reproduce consistently "
+                "because the corruption may happen before the crash."
+            ),
+            "fix": [
+                "This is a game bug - please report it with the dump file",
+                "Note what you were doing when it crashed - especially any unusual sequences of actions",
+                "If you have mods, try without them first",
+            ],
+            "dev_note": "Heap corruption - use heap debug allocator to find the stomper",
+            "confidence": "HIGH",
         })
 
     if ex_code == 0xE06D7363:
@@ -5708,6 +5686,303 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
             "confidence": "LOW",
         })
 
+    if is_suicide:
+        active = build_active_subsystems()
+
+        conf, evidence = subsystem_match(active, ["dstorage", "dstoragecore"])
+        if conf:
+            return _builtin("SUICIDE_DSTORAGE", {
+                "id": "SUICIDE_DSTORAGE",
+                "name": "Engine suicide during DirectStorage streaming",
+                "player_message": (
+                    "The game detected an internal error while loading assets via DirectStorage "
+                    "and shut itself down. This is often caused by outdated GPU drivers that "
+                    "don't properly support DirectStorage."
+                ),
+                "fix": [
+                    "Update your GPU drivers to the latest version",
+                    "If on AMD: use DDU (Display Driver Uninstaller) to fully clean old drivers first",
+                    "Verify game files through Steam",
+                    "If the crash persists, disable DirectStorage in game settings if available",
+                ],
+                "dev_note": f"Engine suicide with DirectStorage on active stack ({evidence}) - likely DS decompression or IO error",
+                "confidence": conf,
+            })
+
+        lua_mods_present = bool(mods.get("lua_mods"))
+        crash_in_lua = crash_mod_l and "lua" in crash_mod_l
+        conf, evidence = subsystem_match(active, ["lua"])
+        if conf and (lua_mods_present or crash_in_lua):
+            return _builtin("SUICIDE_LUA", {
+                "id": "SUICIDE_LUA",
+                "name": "Engine suicide from Lua scripting error",
+                "player_message": (
+                    "The game detected a scripting error and shut itself down. "
+                    + ("Lua mod patch files were detected in your data folder - this is likely caused by a Lua mod. " if lua_mods_present else "")
+                    + ("The crash occurred inside the Lua runtime itself. " if crash_in_lua else "")
+                    + "If you have mods installed, remove them and try again. "
+                    + "If no mods are installed, this may be a bug in a game update."
+                ),
+                "fix": [
+                    "If you have mods installed, remove them and try again",
+                    "Verify game files through Steam",
+                    "Check the game log file for a Lua error message",
+                ],
+                "dev_note": (
+                    f"Engine suicide with Lua on active stack ({evidence}) - "
+                    f"lua_mods_present={lua_mods_present}, crash_in_lua={crash_in_lua}. "
+                    f"Note: lua51.dll being loaded is NORMAL (every HD2 install has it). "
+                    f"This pattern only fires when Lua mod patch files are detected OR "
+                    f"the crash address is inside lua51.dll itself."
+                ),
+                "confidence": conf,
+            })
+
+        gpu_present = any(any(frag in s for frag in GPU_DRIVER_FRAGMENTS) for s in active)
+        d3d12core_present = any("d3d12core" in s for s in active)
+        conf, evidence = subsystem_match(active, [], known_names=AUDIO_ENGINE_DLLS)
+        if conf and not gpu_present and not d3d12core_present:
+            return _builtin("SUICIDE_AUDIO", {
+                "id": "SUICIDE_AUDIO",
+                "name": "Engine suicide during audio playback",
+                "player_message": (
+                    "The game detected an error in the audio system and shut itself down. "
+                    "This can happen with certain audio devices or driver configurations."
+                ),
+                "fix": [
+                    "Try setting your audio output to stereo instead of surround sound",
+                    "Update your audio drivers",
+                    "Try disabling audio enhancements in Windows sound settings",
+                    "Check the game log for audio error messages",
+                ],
+                "dev_note": f"Engine suicide with Wwise/audio on active stack ({evidence}) - check audio event / bank loading",
+                "confidence": conf,
+            })
+
+        if gpu_present:
+            gpu_mod = next((s for s in active if any(frag in s for frag in GPU_DRIVER_FRAGMENTS)), "GPU driver")
+            gpu_info = active.get(gpu_mod, {"min_depth": 999, "hits": 0, "source": "unknown"})
+            if gpu_info["source"] == "crash_chain" and gpu_info["min_depth"] <= 4:
+                gpu_conf = "HIGH"
+            elif gpu_info["source"] == "crash_chain":
+                gpu_conf = "MED"
+            else:
+                gpu_conf = "LOW"
+            return _builtin("SUICIDE_GPU", {
+                "id": "SUICIDE_GPU",
+                "name": "Engine suicide during GPU rendering",
+                "player_message": (
+                    "The game detected an error in the graphics system and shut itself down. "
+                    "This is most commonly caused by outdated or unstable GPU drivers, "
+                    "or a GPU hardware issue."
+                ),
+                "fix": [
+                    "Update your GPU drivers to the latest version",
+                    "If overclocking your GPU, revert to stock settings",
+                    "Try lowering graphics settings, especially ray tracing",
+                    "Check GPU temperature - overheating can cause this",
+                ],
+                "dev_note": f"Engine suicide with GPU driver ({gpu_mod}, depth {gpu_info['min_depth']}, {gpu_info['hits']}x) on active stack - device lost or driver timeout",
+                "confidence": gpu_conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["network", "enet", "raknet"])
+        if conf:
+            return _builtin("SUICIDE_NETWORK", {
+                "id":   "SUICIDE_NETWORK",
+                "name": "Engine suicide during network operation",
+                "player_message": (
+                    "The game detected a network error and shut itself down. "
+                    "This can happen during connection drops, host migration, "
+                    "or if the game server sends unexpected data."
+                ),
+                "fix": [
+                    "Check your internet connection stability",
+                    "Try a wired connection instead of Wi-Fi",
+                    "Check the game log for network error messages",
+                    "Try again - intermittent network issues often resolve themselves",
+                ],
+                "dev_note": f"Engine suicide with network on active stack ({evidence}) - packet error or RPC on dead object",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["physx", "physics", "nvphys"])
+        if conf:
+            return _builtin("SUICIDE_PHYSICS", {
+                "id":   "SUICIDE_PHYSICS",
+                "name": "Engine suicide during physics simulation",
+                "player_message": (
+                    "The game detected a physics simulation error and shut itself down. "
+                    "This can happen with unusual in-game configurations or collisions."
+                ),
+                "fix": [
+                    "Check the game log for physics error messages",
+                    "Verify game files through Steam",
+                    "Note what was happening in-game (large explosion? ragdoll?)",
+                ],
+                "dev_note": f"Engine suicide with PhysX on active stack ({evidence}) - NaN transform or destroyed actor",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["savegame", "save_game", "gamesave"])
+        if conf:
+            return _builtin("SUICIDE_SAVEGAME", {
+                "id":   "SUICIDE_SAVEGAME",
+                "name": "Engine suicide during save/load operation",
+                "player_message": (
+                    "The game detected an error while saving or loading and shut itself down. "
+                    "This can happen with corrupted save data, version mismatches, or "
+                    "async save operations completing after level unload."
+                ),
+                "fix": [
+                    "Check if your save file is corrupted - try loading an earlier save",
+                    "Verify game files through Steam",
+                    "Check the game log for save/load error messages",
+                    "If the crash happens on load, the save file may be from an incompatible game version",
+                ],
+                "dev_note": f"Engine suicide with savegame on active stack ({evidence}) - save version mismatch or async save after unload",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["level", "streaming", "world"])
+        if conf:
+            return _builtin("SUICIDE_LEVEL_STREAMING", {
+                "id":   "SUICIDE_LEVEL_STREAMING",
+                "name": "Engine suicide during level streaming",
+                "player_message": (
+                    "The game detected an error while streaming level data and shut itself down. "
+                    "This can happen when a level fails to load, or objects in an unloading level "
+                    "are still being accessed."
+                ),
+                "fix": [
+                    "Verify game files through Steam - the level data may be corrupted",
+                    "Check the game log for streaming/load errors",
+                    "Note which level or area you were entering when it crashed",
+                    "Try lowering texture/streaming settings if available",
+                ],
+                "dev_note": f"Engine suicide with level/streaming on active stack ({evidence}) - level unload race or missing level data",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["anim", "skeleton", "blend"])
+        if conf:
+            return _builtin("SUICIDE_ANIMATION", {
+                "id":   "SUICIDE_ANIMATION",
+                "name": "Engine suicide during animation update",
+                "player_message": (
+                    "The game detected an error in the animation system and shut itself down. "
+                    "This can happen with mismatched skeletons, deleted animation states, "
+                    "or bone index out of range."
+                ),
+                "fix": [
+                    "Check the game log for animation error messages",
+                    "Verify game files through Steam",
+                    "Note what your character was doing when it crashed (loading screen? combat?)",
+                ],
+                "dev_note": f"Engine suicide with animation on active stack ({evidence}) - mismatched skeleton or deleted anim state",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["hud", "widget", "scaleform"], known_names=UI_DLLS)
+        if conf:
+            return _builtin("SUICIDE_UI", {
+                "id":   "SUICIDE_UI",
+                "name": "Engine suicide during UI/HUD update",
+                "player_message": (
+                    "The game detected an error in the UI system and shut itself down. "
+                    "This can happen when a UI widget accesses a destroyed entity, or "
+                    "a font/texture atlas is not loaded when the HUD draws."
+                ),
+                "fix": [
+                    "Check the game log for UI/HUD error messages",
+                    "Verify game files through Steam",
+                    "Note what was on screen when it crashed (menu? HUD element?)",
+                ],
+                "dev_note": f"Engine suicide with UI/HUD on active stack ({evidence}) - widget accessing destroyed entity or missing atlas",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["entity", "unit"])
+        if conf:
+            return _builtin("SUICIDE_ENTITY", {
+                "id":   "SUICIDE_ENTITY",
+                "name": "Engine suicide during entity/unit update",
+                "player_message": (
+                    "The game detected an error in the entity system and shut itself down. "
+                    "This can happen when a component is accessed on a destroyed entity, "
+                    "or an entity ID is reused before all references were cleared."
+                ),
+                "fix": [
+                    "Check the game log for entity/unit error messages",
+                    "Verify game files through Steam",
+                    "Note what was happening in-game (spawning? mission event? enemy death?)",
+                ],
+                "dev_note": f"Engine suicide with entity/unit on active stack ({evidence}) - use-after-free or stale entity ID",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["resource", "package", "bundle"])
+        if conf:
+            return _builtin("SUICIDE_RESOURCE", {
+                "id":   "SUICIDE_RESOURCE",
+                "name": "Engine suicide during resource loading",
+                "player_message": (
+                    "The game detected an error while loading a resource (texture, model, sound) "
+                    "and shut itself down. This is often caused by corrupted or missing game files."
+                ),
+                "fix": [
+                    "Verify game files through Steam - a resource file may be corrupted or missing",
+                    "Check the game log for resource loading errors",
+                    "Note which level or area you were entering when it crashed",
+                    "If modded, remove mods that replace game assets",
+                ],
+                "dev_note": f"Engine suicide with resource_manager/package on active stack ({evidence}) - corrupted or missing resource",
+                "confidence": conf,
+            })
+
+        conf, evidence = subsystem_match(active, ["shader", "dxcompiler", "d3dcompiler"])
+        if conf:
+            return _builtin("SUICIDE_SHADER", {
+                "id":   "SUICIDE_SHADER",
+                "name": "Engine suicide during shader compilation",
+                "player_message": (
+                    "The game detected an error during shader compilation and shut itself down. "
+                    "This is usually caused by outdated GPU drivers that don't support the "
+                    "required shader model."
+                ),
+                "fix": [
+                    "Update your GPU drivers to the latest version",
+                    "If on a very old GPU, it may not support the required shader model",
+                    "Check the game log for shader compilation errors",
+                    "Try lowering graphics settings, especially shader-heavy features",
+                ],
+                "dev_note": f"Engine suicide with shader/dxcompiler on active stack ({evidence}) - shader permutation compile failure",
+                "confidence": conf,
+            })
+
+        return _builtin("SUICIDE_GENERIC", {
+            "id": "SUICIDE_GENERIC",
+            "name": "Engine detected an internal error and shut down",
+            "player_message": (
+                "The game detected something unexpected internally and safely shut itself down "
+                "rather than continuing in a broken state. The engine log file contains "
+                "the actual error message."
+            ),
+            "fix": [
+                "Enable logging with Steam launch option --log-to-file, then check %APPDATA%\\Arrowhead\\Helldivers 2\\logs for the engine log",
+                "Verify game files through Steam",
+                "Share the .log AND .dmp files with the 418th",
+            ],
+            "dev_note": "Generic engine suicide - no subsystem matched in crash chain. Check engine log for trigger.",
+            "confidence": "MED",
+        })
+
+    _has_nvidia = any("nvwgf" in m or "nvgpucomp" in m or "nvd3d" in m
+                      for m in all_mods.split())
+    _has_intel_igpu = any("igd10um" in m or "igc64" in m or "igdgmm" in m
+                          for m in all_mods.split())
+
+
     return None
 
 def build_plain_english(parsed: dict, rootcause: list, mods: dict, pattern: "dict | None",
@@ -5990,8 +6265,17 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
         or any(frag in crash_module.lower() for frag in gpu_driver_frags)
     )
 
-    is_mod = (
+    is_mod_confirmed = (
         mods.get("has_mods") and mods.get("confidence") == "HIGH"
+        and any(
+            i.get("type") in ("proxy_dll", "mod_manager", "unknown_dll")
+            or (i.get("type") == "lua_mod" and i.get("tier") == "confirmed")
+            for i in mods.get("indicators", [])
+            if i.get("severity") == "HIGH"
+        )
+    )
+    is_mod_suspected = (
+        mods.get("has_mods") and not is_mod_confirmed
     )
 
     is_game_bug = False
@@ -6000,33 +6284,42 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
     elif ex_code == 0xC0000005 and not is_suicide:
         is_game_bug = True
 
-    if is_suicide:
-        verdict = "SUICIDE"
-        color = V_SUICIDE
-        su_pattern = None
-        if all_patterns:
-            for p in all_patterns:
-                if p.get("id", "").startswith("SUICIDE"):
-                    su_pattern = p
-                    break
-        if su_pattern:
-            title = su_pattern.get("name", "Engine suicide")
-            explanation = su_pattern.get("player_message", "")
+    if is_mod_confirmed:
+        verdict = "MOD"
+        color = V_MOD
+        high_inds = [i for i in mods.get("indicators", []) if i.get("severity") == "HIGH"]
+        if high_inds:
+            kind = high_inds[0].get("type", "mod")
+            if kind == "proxy_dll":
+                title = "Proxy DLL detected (ReShade/ENB/mod hook)"
+            elif kind == "mod_manager":
+                title = "Mod manager detected"
+            elif kind == "lua_mod":
+                title = "Lua mod patch files detected"
+            else:
+                title = "Unknown DLL in game folder"
         else:
-            title = "Engine suicide (Stingray)"
+            title = "Mods detected"
+        if is_suicide:
             explanation = (
-                "The Stingray engine intentionally terminated the process after detecting "
-                "an internal error. This is NOT a game bug - the crash instruction is the "
-                "engine's suicide mechanism. To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs"
+                "Third-party mods or proxy DLLs were detected, and the engine then committed "
+                "suicide (intentional shutdown). The mod is the likely root cause - mods can "
+                "corrupt engine state and trigger the suicide handler. Remove all mods and "
+                "retest before reporting this as a game bug."
+            )
+        else:
+            explanation = (
+                "Third-party mods or proxy DLLs were detected. These can cause crashes that "
+                "wouldn't occur in the vanilla game. Remove mods and retest before reporting as a bug."
             )
         confidence = "HIGH"
         actions = [
-            {"label": "1. Open .log file", "command": "open_log", "primary": True,
-             "description": "Right-click game in Steam > Properties > Launch Options > add --log-to-file > launch and crash > check %APPDATA%\\Arrowhead\\Helldivers 2\\logs"},
+            {"label": "1. Remove mods and retest", "command": "open_mods_guide", "primary": True,
+             "description": "Remove all mods, proxy DLLs, and .patch_* files from the game folder, then verify game files through Steam and retest"},
             {"label": "2. Export report", "command": "export", "primary": False,
-             "description": "Generate a PDF to share with the dev team"},
-            {"label": "3. View active game thread", "command": "goto_threads", "primary": False,
-             "description": "The thread that was running when suicide fired is the likely trigger"},
+             "description": "Generate a PDF to share with the dev team (mention you had mods installed)"},
+            {"label": "3. View modules", "command": "goto_modules", "primary": False,
+             "description": "See exactly which DLLs were flagged as mods/proxies"},
         ]
 
     elif is_gpu:
@@ -6054,34 +6347,6 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
              "description": "Generate a PDF to share with the dev team"},
             {"label": "3. Open GPU log (DRED)", "command": "open_dred", "primary": False,
              "description": "If you have a DRED log, open it for breadcrumb analysis"},
-        ]
-
-    elif is_mod:
-        verdict = "MOD"
-        color = V_MOD
-        high_inds = [i for i in mods.get("indicators", []) if i.get("severity") == "HIGH"]
-        if high_inds:
-            kind = high_inds[0].get("type", "mod")
-            if kind == "proxy_dll":
-                title = "Proxy DLL detected (ReShade/ENB/mod hook)"
-            elif kind == "mod_manager":
-                title = "Mod manager detected"
-            else:
-                title = "Unknown DLL in game folder"
-        else:
-            title = "Mods detected"
-        explanation = (
-            "Third-party mods or proxy DLLs were detected. These can cause crashes that "
-            "wouldn't occur in the vanilla game. Remove mods and retest before reporting as a bug."
-        )
-        confidence = "HIGH"
-        actions = [
-            {"label": "1. Remove mods and retest", "command": "mod_guide", "primary": True,
-             "description": "Remove proxy DLLs from the game folder and verify game files"},
-            {"label": "2. Export report", "command": "export", "primary": False,
-             "description": "Generate a PDF showing the mod indicators found"},
-            {"label": "3. View mod details", "command": "goto_mods", "primary": False,
-             "description": "See exactly which DLLs and paths were flagged"},
         ]
 
     elif is_game_bug:
@@ -6118,6 +6383,40 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
              "description": "See the stack walk leading to the crash"},
         ]
 
+    elif is_suicide:
+        verdict = "SUICIDE"
+        color = V_SUICIDE
+        su_pattern = None
+        if all_patterns:
+            for p in all_patterns:
+                if p.get("id", "").startswith("SUICIDE"):
+                    su_pattern = p
+                    break
+        if su_pattern:
+            title = su_pattern.get("name", "Engine suicide")
+            explanation = su_pattern.get("player_message", "")
+        else:
+            title = "Engine suicide (root cause unknown)"
+            explanation = (
+                "The Stingray engine intentionally killed itself after detecting an internal "
+                "error. This is the engine's DEFAULT behavior when anything goes wrong - the "
+                "suicide is a byproduct, not the root cause. No mods, GPU driver crash, or "
+                "specific exception code was identified, so the actual trigger is unknown. "
+                "To find the real cause: right-click the game in Steam > Properties > Launch "
+                "Options > add --log-to-file > launch and play until it crashes. The log will "
+                "be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs - the engine log contains the "
+                "actual error message that triggered the suicide."
+            )
+        confidence = "LOW"
+        actions = [
+            {"label": "1. Open .log file", "command": "open_log", "primary": True,
+             "description": "The engine log contains the actual error message - without it, the root cause cannot be determined. Right-click game in Steam > Properties > Launch Options > add --log-to-file > launch and crash > check %APPDATA%\\Arrowhead\\Helldivers 2\\logs"},
+            {"label": "2. Export report", "command": "export", "primary": False,
+             "description": "Generate a PDF to share with the dev team"},
+            {"label": "3. View active game thread", "command": "goto_threads", "primary": False,
+             "description": "The thread that was running when suicide fired is the likely trigger"},
+        ]
+
     else:
         verdict = "INCONCLUSIVE"
         color = V_INCONCLUSIVE
@@ -6138,6 +6437,22 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
     signature = hashlib.md5(sig_input.encode()).hexdigest()[:8].upper()
     sig_prefix = {"SUICIDE": "SUI", "GPU": "GPU", "MOD": "MOD", "GAME_BUG": "BUG", "INCONCLUSIVE": "UNK"}[verdict]
     signature = f"{sig_prefix}-{signature}"
+
+    if is_mod_suspected and verdict != "MOD":
+        suspected_notes = []
+        for i in mods.get("indicators", []):
+            if i.get("type") == "lua_mod" and i.get("tier") == "suspected":
+                suspected_notes.append(
+                    f"Suspected Lua mod patch file: {PureWindowsPath(i['path']).name} "
+                    f"(signature unconfirmable - dump does not contain the file's memory)"
+                )
+        if suspected_notes:
+            note = " | ".join(suspected_notes)
+            explanation = explanation + f"\n\n⚠ Mod note: {note}. Consider asking the user to confirm whether they have mods installed."
+            actions = list(actions) + [
+                {"label": "Ask user about mods", "command": "ask_about_mods", "primary": False,
+                 "description": "A suspected Lua mod was detected but could not be cryptographically verified. Ask the user if they have any mods installed."}
+            ]
 
     return {
         "verdict": verdict,
@@ -6771,8 +7086,10 @@ class ScrollableFrame(tk.Frame):
         return self._inner
 
 
+_BaseWindow = TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk
 
-class CrashAnalyzerUI(tk.Tk):
+
+class CrashAnalyzerUI(_BaseWindow):
 
     def __init__(self):
         super().__init__()
@@ -6804,6 +7121,28 @@ class CrashAnalyzerUI(tk.Tk):
         self._build_ui()
 
         self._show_drop_zone()
+
+        if _DND_AVAILABLE:
+            def _on_drop(event):
+                raw = event.data
+                paths = self.tk.splitlist(raw)
+                for p in paths:
+                    pl = p.lower()
+                    if pl.endswith((".dmp", ".mdmp")):
+                        self._load_path(p)
+                        break
+                    if pl.endswith("_dred.txt") or pl.endswith(".dred.txt"):
+                        self._load_dred(p)
+                        break
+
+            try:
+                self.drop_target_register(DND_FILES)
+                self.dnd_bind("<<Drop>>", _on_drop)
+                self._dnd_active = True
+            except Exception as e:
+                self._dnd_active = False
+        else:
+            self._dnd_active = False
 
     def _build_ui(self):
         topbar = tk.Frame(self, bg=BG2, pady=0, padx=0)
@@ -9570,7 +9909,7 @@ class CrashAnalyzerUI(tk.Tk):
             })
 
         elif scenario == "reshade_d3d_corrupt":
-            d3d12_base = 0x00007FF8002000000
+            d3d12_base = 0x00007FF800200000
             p["exception"]["code"] = "0xc0000005"
             p["exception"]["address"] = f"0x{d3d12_base + 0x1234:016X}"
             p["modules"].append({
