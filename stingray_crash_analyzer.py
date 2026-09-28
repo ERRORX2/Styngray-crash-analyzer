@@ -3910,47 +3910,35 @@ def _detect_lua_mods(parsed: dict) -> list:
         except Exception:
             continue
 
+        sig_verified = False
+        sig_hex = None
         if sig_checkable:
             sig_bytes = read_virtual_memory(parsed, base + LUA_PATCH_OFFSET, 8)
-            if sig_bytes is None or len(sig_bytes) < 8:
-                results.append({
-                    "path": name,
-                    "base": m.get("base", "?"),
-                    "size": m.get("size", 0),
-                    "signature_offset": LUA_PATCH_OFFSET,
-                    "signature_matched": None,
-                    "source": "module_list",
-                    "confirmed": False,
-                    "tier": "suspected",
-                    "reason": f"Path matches .patch_* in \\data\\ but memory at base+0x{LUA_PATCH_OFFSET:X} not in dump - {sig_reason}",
-                })
-                continue
-            if sig_bytes == LUA_TYPE_ID_SIGNATURE:
-                results.append({
-                    "path": name,
-                    "base": m.get("base", "?"),
-                    "size": m.get("size", 0),
-                    "signature_offset": LUA_PATCH_OFFSET,
-                    "signature_matched": LUA_TYPE_ID_SIGNATURE.hex(),
-                    "source": "module_list",
-                    "confirmed": True,
-                    "tier": "confirmed",
-                    "reason": f"Path matches AND MurMur64('lua') signature verified at offset 0x{LUA_PATCH_OFFSET:X}",
-                })
-            else:
-                pass
+            if sig_bytes and len(sig_bytes) >= 8 and sig_bytes == LUA_TYPE_ID_SIGNATURE:
+                sig_verified = True
+                sig_hex = LUA_TYPE_ID_SIGNATURE.hex()
+
+        if sig_verified:
+            reason = f"Path matches .patch_* in \\data\\ AND MurMur64('lua') signature verified at offset 0x{LUA_PATCH_OFFSET:X}"
+        elif sig_checkable:
+            reason = (f"Path matches .patch_* in \\data\\ - no legitimate game file uses this naming convention. "
+                      f"Signature could not be read from dump memory but the filename is definitive proof of a Lua mod. "
+                      f"({sig_reason})")
         else:
-            results.append({
-                "path": name,
-                "base": m.get("base", "?"),
-                "size": m.get("size", 0),
-                "signature_offset": LUA_PATCH_OFFSET,
-                "signature_matched": None,
-                "source": "module_list",
-                "confirmed": False,
-                "tier": "suspected",
-                "reason": f"Path matches .patch_* in \\data\\ but signature unconfirmable - {sig_reason}",
-            })
+            reason = (f"Path matches .patch_* in \\data\\ - no legitimate game file uses this naming convention. "
+                      f"This is a Lua mod. Signature verification not possible ({sig_reason}) but filename alone is sufficient proof.")
+
+        results.append({
+            "path": name,
+            "base": m.get("base", "?"),
+            "size": m.get("size", 0),
+            "signature_offset": LUA_PATCH_OFFSET,
+            "signature_matched": sig_hex,
+            "source": "module_list",
+            "confirmed": True,
+            "tier": "confirmed",
+            "reason": reason,
+        })
 
     if not results and sig_checkable:
         results = _scan_memory_for_lua_signature(parsed)
@@ -4245,23 +4233,16 @@ def detect_mods(parsed: dict) -> dict:
 
     lua_mods = _detect_lua_mods(parsed)
     for lm in lua_mods:
-        tier = lm.get("tier", "suspected")
-        if tier == "confirmed":
-            detail = (
-                f"Lua mod patch file CONFIRMED: {PureWindowsPath(lm['path']).name} "
-                f"in data folder - MurMur64('lua') signature verified at offset 0x{LUA_PATCH_OFFSET:X}"
-            )
-        else:
-            detail = (
-                f"Lua mod patch file SUSPECTED: {PureWindowsPath(lm['path']).name} "
-                f"matches .patch_* naming in \\data\\ folder, but signature could not be verified "
-                f"(dump does not contain the file's memory). Reason: {lm.get('reason', 'unknown')}"
-            )
+        detail = (
+            f"Lua mod patch file detected: {PureWindowsPath(lm['path']).name} "
+            f"in data folder. No legitimate game file uses .patch_* naming - "
+            f"this is a Lua mod. {lm.get('reason', '')}"
+        )
         indicators.append({
             "type":   "lua_mod",
             "path":   lm["path"],
             "detail": detail,
-            "tier":   tier,
+            "tier":   "confirmed",
         })
 
     seen = set()
@@ -7110,6 +7091,10 @@ class CrashAnalyzerUI(_BaseWindow):
         self.bind_all("<Control-2>", lambda e: self._select_tab(1))
         self.bind_all("<Control-3>", lambda e: self._select_tab(2))
         self.bind_all("<Control-4>", lambda e: self._select_tab(3))
+        self.bind_all("<Control-5>", lambda e: self._select_tab(4))
+        self.bind_all("<Control-6>", lambda e: self._select_tab(5))
+        self.bind_all("<Control-7>", lambda e: self._select_tab(6))
+        self.bind_all("<Control-8>", lambda e: self._select_tab(7))
         self.bind_all("<Control-e>", lambda e: self.execute_action("export"))
         self.bind_all("<Control-l>", lambda e: self.execute_action("open_log"))
         self.bind_all("<Control-o>", lambda e: self._open_file())
@@ -7222,6 +7207,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._tab_registers = tk.Frame(self._nb, bg=BG)
         self._tab_threads = tk.Frame(self._nb, bg=BG)
         self._tab_modules = tk.Frame(self._nb, bg=BG)
+        self._tab_folder = tk.Frame(self._nb, bg=BG)
         self._tab_gpu = tk.Frame(self._nb, bg=BG)
 
         self._nb.add(self._tab_summary, text="  Summary  ")
@@ -7230,6 +7216,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._nb.add(self._tab_registers, text="  Registers  ")
         self._nb.add(self._tab_threads, text="  Threads  ")
         self._nb.add(self._tab_modules, text="  Modules & DLLs  ")
+        self._nb.add(self._tab_folder, text="  Game Folder  ")
         self._nb.add(self._tab_gpu, text="  GPU Hang  ")
 
         self._build_summary_tab()
@@ -7238,6 +7225,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._build_registers_tab()
         self._build_threads_tab()
         self._build_modules_tab()
+        self._build_folder_tab()
         self._build_gpu_tab()
 
         for i in range(self._nb.index('end')):
@@ -8141,6 +8129,197 @@ class CrashAnalyzerUI(_BaseWindow):
         scrollable.pack(fill="both", expand=True)
         self._modules_inner = scrollable.inner
 
+    def _build_folder_tab(self):
+        header = tk.Frame(self._tab_folder, bg=BG2, padx=16, pady=8)
+        header.pack(fill="x")
+        tk.Label(header, text="Game Folder Structure", bg=BG2, fg=ACCENT,
+                 font=(UI_FONT, 11, "bold")).pack(side="left")
+        tk.Label(header, text="All loaded PE modules grouped by folder · color-coded by type",
+                 bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 9)).pack(side="left", padx=(10, 0))
+
+        legend = tk.Frame(self._tab_folder, bg=BG, padx=16, pady=4)
+        legend.pack(fill="x")
+        for label, color in [("Known game DLL", GREEN), ("System DLL", TEXT_DIM),
+                              ("Unknown DLL (possible mod)", RED), ("Proxy DLL", ORANGE),
+                              ("Lua mod", PURPLE), ("Crash module", RED),
+                              ("Crash handler", TEXT_DIM)]:
+            tk.Label(legend, text="■", fg=color, bg=BG, font=(UI_FONT, 8)).pack(side="left")
+            tk.Label(legend, text=f" {label}  ", fg=color, bg=BG,
+                     font=(UI_FONT, 8)).pack(side="left")
+
+        tree_frame = tk.Frame(self._tab_folder, bg=BG)
+        tree_frame.pack(fill="both", expand=True, padx=8, pady=4)
+
+        self._folder_tree = ttk.Treeview(tree_frame,
+            columns=("type", "base", "size", "status"),
+            show="tree headings", selectmode="browse")
+        self._folder_tree.heading("#0", text="Folder / File")
+        self._folder_tree.heading("type", text="Type")
+        self._folder_tree.heading("base", text="Base Address")
+        self._folder_tree.heading("size", text="Size")
+        self._folder_tree.heading("status", text="Status")
+
+        self._folder_tree.column("#0", width=420, minwidth=300)
+        self._folder_tree.column("type", width=140, minwidth=100)
+        self._folder_tree.column("base", width=120, minwidth=80)
+        self._folder_tree.column("size", width=80, minwidth=60)
+        self._folder_tree.column("status", width=100, minwidth=80)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._folder_tree.yview)
+        self._folder_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._folder_tree.pack(fill="both", expand=True)
+
+        style = ttk.Style()
+        style.configure("Folder.Treeview", background=BG2, fieldbackground=BG2,
+                        foreground=TEXT, rowheight=22, font=(UI_FONT, 9))
+        style.configure("Folder.Treeview.Heading", background=BG3, foreground=ACCENT,
+                        font=(UI_FONT, 9, "bold"))
+        style.map("Folder.Treeview", background=[("selected", BG3)])
+        self._folder_tree.configure(style="Folder.Treeview")
+
+        self._folder_tree.tag_configure("safe", foreground=GREEN)
+        self._folder_tree.tag_configure("system", foreground=TEXT_DIM)
+        self._folder_tree.tag_configure("unknown", foreground=RED)
+        self._folder_tree.tag_configure("proxy", foreground=ORANGE)
+        self._folder_tree.tag_configure("lua_mod", foreground=PURPLE)
+        self._folder_tree.tag_configure("crash", foreground=RED, background="#3a1518")
+        self._folder_tree.tag_configure("handler", foreground=TEXT_DIM)
+        self._folder_tree.tag_configure("folder", foreground=ACCENT, font=(UI_FONT, 9, "bold"))
+
+    def _populate_folder_tree(self, parsed, mods):
+        for item in self._folder_tree.get_children():
+            self._folder_tree.delete(item)
+
+        modules = parsed.get("modules", [])
+        ex = parsed.get("exception") or {}
+        try:
+            crash_addr = int(ex.get("address", "0"), 16)
+        except Exception:
+            crash_addr = 0
+
+        mod_indicators = {}
+        for ind in mods.get("indicators", []):
+            sn = PureWindowsPath(ind.get("path", "")).name.lower()
+            mod_indicators[sn] = ind
+
+        lua_mod_paths = set()
+        for lm in mods.get("lua_mods", []):
+            lua_mod_paths.add(PureWindowsPath(lm["path"]).name.lower())
+
+        from collections import OrderedDict
+        tree = OrderedDict()
+
+        for m in modules:
+            name = m.get("name", "???")
+            sn = PureWindowsPath(name).name
+            snl = sn.lower()
+            try:
+                base = int(m.get("base", "0"), 16)
+            except Exception:
+                base = 0
+            size = m.get("size", 0)
+            is_crash_mod = base <= crash_addr < base + size if base and crash_addr else False
+
+            parts = PureWindowsPath(name).parts
+            if not parts:
+                continue
+
+            node = tree
+            for i, part in enumerate(parts):
+                if i == len(parts) - 1:
+                    if "_files" not in node:
+                        node["_files"] = []
+                    tag = "system"
+                    type_label = "System DLL"
+                    status = "✓"
+
+                    if is_crash_mod:
+                        tag = "crash"
+                        type_label = "CRASH MODULE"
+                        status = "✗ CRASH"
+
+                    ind = mod_indicators.get(snl)
+                    if snl in lua_mod_paths:
+                        tag = "lua_mod"
+                        type_label = "Lua mod (.patch_*)"
+                        status = "⚠ MOD"
+                    elif ind and ind.get("type") == "proxy_dll":
+                        tag = "proxy"
+                        type_label = "Proxy DLL"
+                        status = "⚠ MOD"
+                    elif ind and ind.get("type") == "mod_manager":
+                        tag = "unknown"
+                        type_label = "Mod manager"
+                        status = "⚠ MOD"
+                    elif ind and ind.get("type") == "unknown_dll":
+                        tag = "unknown"
+                        type_label = "Unknown DLL"
+                        status = "⚠ MOD?"
+                    elif ind and ind.get("type") == "appdata_mod":
+                        tag = "unknown"
+                        type_label = "AppData mod"
+                        status = "⚠ MOD?"
+                    else:
+                        nl = name.lower().replace("/", "\\")
+                        if "\\windows\\" in nl or "\\system32\\" in nl or "\\syswow64\\" in nl:
+                            tag = "system"
+                            type_label = "System DLL"
+                        elif snl in {"crs-client.dll", "crashpad_handler.exe", "crashrpt.dll",
+                                      "sentry.dll", "backtrace.dll"}:
+                            tag = "handler"
+                            type_label = "Crash handler"
+                        elif PureWindowsPath(name).suffix.lower() == ".exe":
+                            tag = "safe"
+                            type_label = "Game EXE"
+                        else:
+                            tag = "safe"
+                            type_label = "Game DLL"
+
+                    size_str = f"{size:,}" if isinstance(size, int) and size > 0 else "?"
+                    if isinstance(size, int) and size > 1024 * 1024:
+                        size_str = f"{size / 1024 / 1024:.1f} MB"
+                    elif isinstance(size, int) and size > 1024:
+                        size_str = f"{size / 1024:.0f} KB"
+
+                    node["_files"].append((sn, tag, type_label, m.get("base", "?"), size_str, status))
+                else:
+                    if part not in node:
+                        node[part] = OrderedDict()
+                    node = node[part]
+
+        def insert_node(parent, name, node, path_prefix=""):
+            for key in node:
+                if key == "_files":
+                    continue
+                child_id = self._folder_tree.insert(parent, "end",
+                    text=f"📁 {key}", values=("", "", "", ""),
+                    tags=("folder",), open=True)
+                insert_node(child_id, key, node[key], f"{path_prefix}\\{key}")
+
+            files = node.get("_files", [])
+            files.sort(key=lambda f: f[0].lower())
+            for fname, tag, type_label, base, size, status in files:
+                icon = "📄"
+                if tag == "crash":
+                    icon = "💥"
+                elif tag == "lua_mod":
+                    icon = "🔥"
+                elif tag == "proxy":
+                    icon = "⚡"
+                elif tag == "unknown":
+                    icon = "❓"
+                elif tag == "handler":
+                    icon = "🔧"
+
+                self._folder_tree.insert(parent, "end",
+                    text=f"{icon} {fname}",
+                    values=(type_label, base, size, status),
+                    tags=(tag,))
+
+        for root_name in tree:
+            insert_node("", root_name, tree[root_name])
+
     def _build_gpu_tab(self):
         self._gpu_placeholder = tk.Label(self._tab_gpu,
             text="No GPU log loaded. Use 'Open GPU Log' to load a DRED .txt file.",
@@ -8225,7 +8404,7 @@ class CrashAnalyzerUI(_BaseWindow):
             verdict = assess_dred(parsed_dred)
             self._display_dred(parsed_dred, verdict)
             self._status(f"DRED parsed - {verdict.get('reason_name', 'unknown')}", busy=False)
-            self._nb.select(4)
+            self._nb.select(7)
         except Exception as e:
             self._status(f"DRED parse error: {e}", busy=False)
 
@@ -8296,6 +8475,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._display_registers(parsed)
         self._display_threads(parsed)
         self._display_modules(parsed, mods, verdict_info)
+        self._populate_folder_tree(parsed, mods)
 
         ex_code = ex.get("code", "none")
         nmod = len(parsed.get("modules", []))
@@ -8709,11 +8889,13 @@ class CrashAnalyzerUI(_BaseWindow):
         elif command == "export":
             self._export_report()
         elif command == "goto_threads":
-            self._nb.select(2)
+            self._nb.select(4)
         elif command == "goto_rootcause":
-            self._nb.select(1)
+            self._nb.select(2)
         elif command == "goto_mods":
-            self._nb.select(3)
+            self._nb.select(5)
+        elif command == "goto_folder":
+            self._nb.select(6)
         elif command == "open_dred":
             self._open_dred_file()
         elif command == "gpu_guide":
@@ -8858,14 +9040,16 @@ class CrashAnalyzerUI(_BaseWindow):
             return
         tab = link.get("tab")
         if tab == "modules":
-            self._nb.select(3)
+            self._nb.select(5)
         elif tab == "threads":
-            self._nb.select(2)
+            self._nb.select(4)
         elif tab == "rootcause":
-            self._nb.select(1)
+            self._nb.select(2)
+        elif tab == "folder":
+            self._nb.select(6)
 
     def _select_tab(self, index: int):
-        if index < 5:
+        if index < 8:
             self._nb.select(index)
 
 
