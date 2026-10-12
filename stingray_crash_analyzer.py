@@ -13,6 +13,8 @@ import struct
 import os
 import sys
 import hashlib
+import base64
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
@@ -2692,6 +2694,13 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
         "total_modules":   len(pdata_cache),
     }
 
+    if not chain:
+        scanned = fallback_stack_scan(parsed)
+        for i, val, sn, off, label in scanned[:16]:
+            chain.append((val, sn, off, False))
+        if chain:
+            parsed["_stack_unwind"]["fallback_scan"] = len(chain)
+
     parsed["_stack_chain_extended"] = chain
     return [(a, m, o) for a, m, o, _ in chain]
 
@@ -2904,8 +2913,12 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
 
             fault_mod, fault_off, _ = mod_for_addr(ex_addr)
             if fault_mod:
+                func_name = resolve_game_dll_offset(fault_off) if fault_mod.lower() == "game.dll" else None
+                loc_str = f"{fault_mod} +0x{fault_off:X}"
+                if func_name:
+                    loc_str = f"{fault_mod}!{func_name}"
                 findings.append({"conf": "HIGH",
-                    "title": f"Faulting instruction in {fault_mod} +0x{fault_off:X}",
+                    "title": f"Faulting instruction in {loc_str}",
                     "detail": (f"The CPU instruction that caused the {op} fault was at this location. "
                                f"This is the code that dereferenced the bad pointer - not necessarily where the pointer went bad. "
                                f"Click to inspect in Modules tab."),
@@ -2936,15 +2949,27 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
         rax       = t.get("rax", 0)
         rdx       = t.get("rdx", 0)
         this_null = rcx < 0x1000
+        thread_func = resolve_game_dll_offset(off) if mod.lower() == "game.dll" else None
+        thread_loc = f"{mod} +0x{off:X}"
+        if thread_func:
+            thread_loc = f"{mod}!{thread_func}"
+        entity_hint = ""
+        for reg_name, reg_val in [("rax", rax), ("rcx", rcx), ("rdx", rdx)]:
+            if reg_val and reg_val > 0x100000:
+                ename = resolve_entity_name_from_reg(reg_val)
+                if ename:
+                    entity_hint = f" {reg_name.upper()} holds entity type '{ename}'."
+                    break
         findings.append({"conf": "MED" if not this_null else "HIGH",
-            "title": f"Active game thread in {mod} +0x{off:X}",
+            "title": f"Active game thread in {thread_loc}",
             "detail": (f"This thread was executing game code when the crash occurred - "
                        f"it is the most likely location of the root cause. "
                        + (f"RCX (likely 'this' pointer) = 0x{rcx:016X} - near zero, "
                           f"suggesting a virtual call on a null/destroyed object. "
                           if this_null else
                           f"RCX=0x{rcx:016X}  RDX=0x{rdx:016X}  RAX=0x{rax:016X}. ")
-                       + f"Click to inspect in Threads tab."),
+                       + entity_hint
+                       + f" Click to inspect in Threads tab."),
             "link": {"tab": "threads", "tid": t["tid"]},
         })
 
@@ -3113,6 +3138,16 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
     except Exception:
         pass
 
+    known_patterns = check_known_crash_patterns(parsed, _pre_decoded, findings)
+    for kp in known_patterns:
+        findings.insert(0, {"conf": kp.get("confidence", "MED"),
+            "title": f"Known crash pattern: {kp['description']}",
+            "detail": (f"CAUSE: {kp['cause']}\n"
+                       f"TRIGGER: {kp['trigger']}\n"
+                       f"FIX: {kp['fix']}"),
+            "link": None,
+        })
+
     if not findings:
         findings.append({"conf": "LOW",
             "title": "Could not determine root cause from dump alone",
@@ -3247,6 +3282,215 @@ def read_virtual_memory(parsed: dict, addr: int, size: int = 128) -> "bytes | No
             avail = min(size, msz - off)
             return raw[rva + off: rva + off + avail]
     return None
+
+
+_GAME_DLL_FUNCTIONS_ENC = "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"
+_GAME_DLL_FUNCTIONS = None
+
+def _load_game_dll_functions():
+    global _GAME_DLL_FUNCTIONS
+    if _GAME_DLL_FUNCTIONS is not None:
+        return _GAME_DLL_FUNCTIONS
+    try:
+        data = _deobfuscate(_GAME_DLL_FUNCTIONS_ENC)
+        entries = data.get("entries", [])
+        funcs = sorted(entries, key=lambda e: e.get("offset", 0))
+        _GAME_DLL_FUNCTIONS = funcs
+        return funcs
+    except Exception:
+        pass
+    _GAME_DLL_FUNCTIONS = []
+    return []
+
+
+def resolve_game_dll_offset(offset: int):
+    funcs = _load_game_dll_functions()
+    if not funcs:
+        return None
+    best = None
+    for f in funcs:
+        foff = f.get("offset", 0)
+        if foff <= offset:
+            if best is None or foff > best.get("offset", 0):
+                best = f
+        else:
+            break
+    if best:
+        foff = best["offset"]
+        delta = offset - foff
+        if delta < 0x10000:
+            name = best["name"]
+            kind = best.get("kind", "")
+            if kind == "start":
+                if delta == 0:
+                    return name
+                return f"{name}+0x{delta:X}"
+            elif kind == "rip":
+                if delta < 0x100:
+                    return f"{name}(global)+0x{delta:X}"
+    return None
+
+
+def fallback_stack_scan(parsed: dict, max_bytes: int = 0x800):
+    results = []
+    ex = parsed.get("exception") or {}
+    regs = ex.get("regs", {})
+    rsp = regs.get("rsp", 0)
+    if not rsp:
+        return results
+    modules = parsed.get("modules", [])
+    stack_data = read_virtual_memory(parsed, rsp, max_bytes)
+    if not stack_data:
+        return results
+    import struct as _struct
+    for i in range(0, len(stack_data) - 7, 8):
+        try:
+            val = _struct.unpack_from("<Q", stack_data, i)[0]
+        except Exception:
+            continue
+        if val < 0x10000 or val > 0x7FFFFFFFFFFF:
+            continue
+        for m in modules:
+            try:
+                base = int(m["base"], 16)
+                size = m.get("size", 0)
+                if isinstance(size, str):
+                    size = int(size, 16)
+                if base <= val < base + size:
+                    off = val - base
+                    sn = PureWindowsPath(m["name"]).name
+                    if sn.lower() in ("ntdll.dll", "kernel32.dll", "kernelbase.dll"):
+                        continue
+                    fn_name = resolve_game_dll_offset(off) if sn.lower() == "game.dll" else None
+                    label = f"{sn}+0x{off:X}"
+                    if fn_name:
+                        label = f"{sn}!{fn_name}"
+                    results.append((i, val, sn, off, label))
+                    break
+            except Exception:
+                continue
+    return results
+
+
+def find_function_start(code: bytes, rva: int, max_search: int = 0x2000):
+    if not code or rva >= len(code):
+        return rva
+    p = min(rva, len(code) - 1)
+    while p > 2 and (rva - p) < max_search:
+        if code[p - 1] == 0xCC and code[p - 2] == 0xCC:
+            return p
+        p -= 1
+    return rva
+
+
+
+
+_ENTITY_DB_ENC = "7WOEHEfpXuItdbV3R9VQodtvkovMmLK7BSAqBuX/AOg41gqVCLv8JQqZJgbgkaKDzWao5Cv8HPkZlemMmDy00exLjayAZOI6ytdxLGqzgoC0zQAoWqxbLODUNxct3QzDGia/2MKkAXgYRVBhdg1sumKtegJNnj6a5yLSw0RUWrkfxwfcqAjXb/2AcY3pHFLfiFyW378ei8oquFoVzJyrrOK27seh1aRvfcuc1H74tAjknVQTFB3jPfp3MgrfTVwotvJY+WnE/tf6KgtDU6GVMTJ1jGuuW/V7FWaqrFHq2NGkj+bryejMn1No0GPqu6OKA1wN2PO8q1o4DNwNP/+mIgZok8bZY7ftUn8v7OYNC9fn+5OWH0xdAfipX2tuUsT+Th5v3Qdz/OOU9lbNwit80uV7SzXWIeFafBmowqabrunEEPBmgGFOywNSYU6og30TISuPc6dCRKXdcQbAvlbWpYoy6p2G4Wr3o4MWQ5E1yiMxnID7PvVJS7TyT1xElBqR9zLUiEINHN6kQjo8HRx/OYkphidkSaHZZqd3mcw7N4nfqlpx9dKciYyAGXAwDWMjjJb/srYJYFl3AS6in7aQcecfy85xw5HwFhwn+E5EluTPvwAuQyVVlPpd+v9N5qSz+wDJnZN7DKsNcPiJIihOYh4/3Qq7uCQK5dQgtEREUxUbYEHiOkZrQDE980F3s8W3rTt3SATR5257FDeRtNKZMnZlvjeJ4cG6YsPNwOU2j+t3EMCH3WTI2ZQRO79TIDNHM2FsfGBHaHaXXrMbUtg5GmN7O4dp8yeS+Ny69Ol+SfFOlCFr/WeU3HvnB1Q9bmNz3GZAXSR6Hnmhbkze5KzQqC/WcOlhcwveArdRVwwos1pg7G92WPe/S8GIOyXvQVxO3sNFH6PtBH0o/XRAMERL9bWLjo1GlYaQ++1qOrB+yxlQLz6BAPvCfm9+RSgwvUNywBSAz5MRD6gsXABKDQ1Xn5DXoXxRKb7GU4co6K3zzQKZ89Dzh5TLqNiBv3lfP2w77zqNHNlGt7XheVOz842ySehYfcu4LU6qUAMx5dKST/xzrUMXs1GoogDX7e0YywiGxK0McZQPtH37XFennRUK+AgFWhJuQbE2r8KB0fcAo89aYdpGJfydzT1HKGL4vz5nslmA82beXkf1/+EsE9ed9uTFLY1Z8LFFET3C6qqJ/xOrP8Rq56oebiQKPrf87nPJGlb7jfzm5v2ehROvRsaQ9+4jzcEW89kqTP2NJkZfYTskN84wyDnqAWe47TRlf9nq5odqqG9p0oz7mh2CkBIIogUoWRBSDqry+ezH2/K/luFSHz+ShccPuzhV2BiP966kX6RqgJIZI6YftT26NPpBLRBWb92+OMY+4H3J55kLHQloSuvzR70Eb+5znyf7ezfP8Aapj1r7SBT0tkfpuced84Fk1DQm8TSIgLUq9y/hAeK6YjyOUkPEHcxLD3o7AR/OGysor4x5Cn85WQDGCkT64CE1v8bkjv42Mkn8biYJy3THEcv1HP3pf9DbTpQzF8N917edLSFc8kCmBRyG7WtNIkVnk0kOVhK5nWV5MW0NOuLIJ5BhHuiREl9KA/aZBcDRwIf8F4re9wQBTB+hErWKdTnJk3nv+LNKXNTjgIAJfRy3q0psia/V6qYxsXrR+wLcpiEXIorywcHYr/zBQK8OyX89RqgliuZW/N9ITPgYd3kJK+o6WTk1uhJ3RCKUrYWcPhVxE2flWkASmhc1/H1k03S4KiRalSn7cNj5kd0I8/82G6N1cz1M+Sb0MlNRFDrg9VgEkQ+RbqZIrA5t2NgAg/Yxs9mwXHJb+wp4nrrcSqpmG6fY4DnxDLwReLNCNy664Xou07CYoHCqtQpqDQXlzdKmg5bqGS48lVF2oWkWo5wUtWdVzn4DT3bWU02ovn1op3UfcwHCle6Xs3KO81CXJ3NzaAMbF0dXSRXHzABLR/a9Ktph7P95xelAbnt0rtDGRZO1AShkw9WtdpMB44ohBZcOoMgYXuDwim1hU5kCovbmBb6i5B2W+p+/oGOaUt0jsCR9KBN2NaH91bTQ/BYhc7FZq05mFqRYfF76pzjdkFtvZezckvWe5e0BpL9PkAQcfJRNxg33mK600qQJqLawVqkHwU7S6IAuNPadKZYkjXZjgsCPJ+dNYDuxJE6tjU2pO65svO8Wx+pXbO28Wlt4WR5r82aPcclSOZ1gOSnEEvClHRP6QfBJl92gUwd5vI+tvUvKPXP7GiNlJNDcn1/9hbjvce9B3H0i4SCxOqjEno4D9iIpC11ZgcVItHjOPqNQj+3GYbbOCcKQqujCF8JdqMKRB6uLYbYAygvCP7J+UdYBnJlGbPEFo9wizmgaQmTDHwo1SSmrN42ZN5X6M9Vdm6vFaqDfHSiojtGJrw8H7U5m5MSyKzqOOGARildItXWQoI6vHNZCDtG6nAaN7xA0UcJgkuxqLBCt+sX1xjjyA7GUNz47fQyjQOIKPhuuu8c6g2Z9T26apLvjUw5N/EF/wd36/N9a72Q7k/Tvpp0KRaB3+JlokhW2jGhHQ29Be82rkvY94d2OxJSa2JdknJorAIRAY88V4PU6P0c5BAqjjSjiIf3RKL4PVXPIfysiQ7wlicymh36s9X5Zjr3Bgke9X/T7IX4kRqkMwCAjsjxb5zlMXOoxrUR5/mYcNvvb4Ij5CjJA8nnbzHH+8agYBf8ySbIRTBSDPo0rpJOZrRC7Yb1dm+1Zy17YzuVmx+ebV/8lB6zS5vLHizhjNXY5llFnOeQpAYHiDWLnR/kdphc/HtXgzczJc2NRfdWnxruTpeaB4DANKjX/HIx8rkeBl+ahiS175wvzF2GOroxetCwWA3JocPVvynzZCFyL4sP2Qu9XO46ra0pnXE4vhar0Aj9JTZMokWhrnJyeQ0Bt86/zTSy0kgfeE9EELeIlUanEcw5T1yGVEVVGwE1Ekr1qgSPgEEi1tyknVbH+BzTIcLulFkcV5kds/jwhNRC0gpk/FSG41lkr3tSquIvH268Dc03nG1VxGbXs8/vljuBb6ucMPgrb1g5E+a44QBvv+4DlqJFLRWuvLMS22Y1JPMSqA6b0gdy5/xscDkTY4gyVaLGvJVMPsju20dhlkcdwPUERX17Z29AOxz7y0T4sxgRyNSbDzkybmYASne8rkRMXvZUvJDU74UboVS7bvvJA8RLvtJ/VkvQ0M5jM/QrNcIzenpRB4Y8vO4fotYbYZeHR52TrXHf8oI8IGpWG8BIUhF3wjPpOfqfANcpYhiWNq1gqpnq3IzCzNBExB3WRGUNto97GlMUG+i0EP3LPeWr7Y7xkVw6/UM8ijGmXY1VRskL2237TV2cVOwNEcNYmyXLqhZJvqcnl2U/Ayvv3MmPLe3i1QJvb/Bxf71JFK1VY5CouimJVQqyvkUUJf/yRBHahxqHdC2JdYcQnZ+JWPi/PUpzhVtVArucszOmc1Z8qiW9Uexo74GzEeEN4g53ltTQnew7wwgq63hT6rvvGMSHX3+5Iapu1H6nd54MseQCHAMcIW0rd1Fhi/7MOhJkUUiABWcvbz1uh7gdeqy0xXlRQDSYbb+RJfjtZOmhcOaiTi93s0U90K2Ctznkb2FMMPbXS+fw5y0+Z1qi+TltbexyUnaz91CQbfZHEyfrNjIpApYuNdzrr5LXWI8u0f+2L6TYRJi9d2tIg0dBVL/BXtariCuadkYhNTZfzH1qNMeOnk7w2ldWImbPEpxfPtYuAwmXoZgQyIEKku329VGIwXSXoNaPKnufVm+YBiL9lzN0FGIJq7M1HxcN8sRgYT/5EfrOxEO4lgB6oLOWZlQZ64apn+NeY+9Axa0f/WVVEwHqziJkpzV4j8thA9ASmM5A75BrfecmyQorEt4TqA7snB0imZCfhgaCs1DEwD/4/Fm5iruFU1c/DsDwiYoMgLc2zhZOWyx5urbjvNS+KpAmuTbCfkdALRarNa73k8RSjhugJ5jXDGAolHihgjipe7dl027ub0sahlPsTXH+YcZNbXEzBTb/KJc9ZSycmv+jXqEaaHg+Dm6MKPYU/xfgufz0BONhDG4M6RtoWf9SuRkJNzvqiCwjQ0m7ynejCdQNEq21pniDQPSqTx2sUtNfIFpp2B5ZvAoCjisV9YgMIwzQdY0dVjGfjmu/XOV/pZv8zBRpYAqUJjsgP0m7owkiQ2QgFUM0BetNu2RAwcOmPdfLNrSoz4pJyKrPuuJTFaEDlvLf80HJ9lQzBbkvn67voXI6y+vc+Z5cnhiagSemyJp+mMQIOP2OMMwl1a9TT44eyDSB2TUuMmlCUmQdPzL2MVaZdUMxvnZOy7RLXIzsbt1nDm5bYhSKJ1tFoFmgXrrV4s4/Pw5W+4ulExpmvkaZZxw+eIQFC87cZvsJGqX3+1/beLs1Ied25ohA7+4uSwKLgij16oFbdgHGspN86uVC32b9f/w464LSkMTUc1r7lIPfEfNqgmlFEtWB7MuN6ECH4UkJQLMfOTFqNLMpeu4cixbpI0iMZ+L6OI+INzKVcnq7txy0sJMYG4aXVFaFs5ugUyAt2myIJ/AdvkWb74PP72BXaIq8ZAOZzblZCHrcfuH0eZ4y8hBdpXYuZk5yM4r/EVKXaU7nibaFyIf3W8p+0taNdN0yYoKij40Rls1+Hozse/KorzUoMHkl0XEGl0cR/U1JAaVJ8K81ZSPFIfGxaQ4yF/pD4JJkxYyIsa7KqjAGd6rZpMjnIIZIvgll85X6MgST4aHZZWZpiIlYaVlXT9OEppL+EIYV6Ahu7UVwtxw0ZlfxBjoSMatCq0AK+qiK4j74fX0jNNoXCJuXRGkGXoTedblfvhK0KyyY1zJSFQ6y/WUy3gdObLK675zJu1CeIWFuWn6CGj6osrV8IjS9i+yeaiUG8BRJBl9xqMTIqGMFWiCQ4QbzWzF+m95wk2A/RHz9x5PebbCA6pa7vVWu1fbTomlIClqhFDhvp3Pq4eqmEV5qJ9G4McD+1r0avr6fZSOvsF2uOAxTJfnA96gpcnVOy4uvNrkrq4UjG2RrKCD9e8bRBCHFPbH2vsKz3f1T3CjY/lo7HRA/GcSf6QwAixfDVrg7tm35xnCagK6tzuoaCond7l9UoNrdBLUiAc1IN9Dx5pImQ+XnJYlmnHeN1pxiA2gaEPuG2qDSBN3SBfydZw6KdrmkZq73GsBtdLXEE4yl1FamlNU3KmMW3lPHr1yW3WxoEGyPO/HGVTAL4ozPBHBU6rAjgxY6yXtSIUX0ZVPPYLe9n2IjTc09oPRF6GREHcGsAt2KrsRhEMUdAme9TcTXRQqxGRgZ1xYmEIcEVRW1Fqi9KzwEuH98TGLDGhn4CrR78K8ImM7Qh3cA2a+bXlcdf8PcjAgDRz2/dpnkqQsWk++tyzO4MSM+E1LCz4ukP+xR2MeZi9S5KIc0w+T4sp+eOXpArGGZau7W4E3zDl8t/e79D39lQyZEtBlDFCDCjGOWrOSHJmBBkrXoyb2418uLTJRcZmMmdujALMHQi5GQcK5gy6swDNlxw1mcnIsMYmVcdsRpzysADVCOsKOLWaZyzbS4EkFHnzBko7nVZzEAnqIXzYnZto5X33T/GmLFJT9IbTv2VHAV/vs+QgoBy6SiJfWWSnGdZVMcKeaeJeHR9E4o8qxuTPoBlcH/7BpiLN7aAmT8Urx2ngHZfPyFM+aa9Rk/DJhII3zvMNvm1qG3VQHYPBy0p5tVHbGQBKP6ypkjvZtwpOOXbZbzBjusxQ9BdB2QAQXv3u98MQTrmZuQginXtyhyLy2FjQswOfOe/PHIfysrB4ddySmTlB5XBxFzHo0eA+9Dn3jnkjydm2pslUEkkcm5YnlHYDt4qMkZTGPh9lBGESnvE2P8kZQ5zEGN+u78Wc3IoVCg9r8F80uztSBRCYiHO95+6qW7jQQf++mrwS6Cz4qfZ6a4YaewfWHOOlGgVA53n+WPf8sZqzntLLIf0QkKHFdRjkUlNHK+cKxmE7l9LEvIF3QtBKakHHtuiOAQ5Jo4eFGeRhiOGqzPitZ80szF9dbByvzJ9+QcMS6pxUcA6vpLY8MhClUg84ry9BwsMxGUTGo+Fy1yBDSo/8LFABXi59aCJd6AtOhSmaX9j0n3Adror3G0J86A0mfPY+9rFsKlJQT8ESiEufsulkmkFAWLkYQmppqH8h4aNaSyGofoit2mlWSsMDFFKbIFAxpHLyVGttY8U//Td1CGHj+Pc/wzwMce7Zsjsul0BkURhMnue5nZGp6dtje7OvzlhssUptBK5kLdQqirwLtSmGsYiT94eq6EosFxiRhCW6SsqjMRQg6AdiNymI/+oTHWc68TUyCZTFziFXo/04Qf+pPDCMS8pmPCspIYu2/DNTHoUMuqiCB+9/ppwE6OpV06oqufkOfZCHiCougTHxJTtvgJlQQWHVEYsf5LlxkR2zzFbrgD962yuk5Fc+w2zpW+h+hLHe1I5/nary3snS8SrLInPEKBkIl+6Nz/rXB3yAZuPJG1XGwTyiR6lqp75gmkUF+rD3CorHf3MfURcH5ykgr4DcHNa5Rr7RGyVgXiAbpj82MEZCS1weKDgFdBN50JzMSHIo5yiPMj7widpCHUJweJqJtup9PObr+bSHjwQGeV2oLoatXuLyyFE+KvE6J5/mQOod3mQ7/F42yxg3wE/qZumMMoy7CrGnUbIYbPu71ThGAfhtFAAwtTmgvhBlaAF39mQz1i+1j/IjcbPR/asq9xiUw+v26gbWcFNYamkqjP73Q3FYJ2VuYnlIO8iBBJU1DXHwk0xcHEZCEQXt8OQxH6+JYfDt6p9FT2lwNA60ONHUUauPdklyRGi0Xb4sO06L9cR/zMFowawY19ZFUJ+yLzI+Bv23ZLprpHAYFl8VIldv6xiptYZo3rCLmcUwPpvf4RXWTvsMfD4IdljbQMqrrXuYLJsVzuUn2peDMdx+aaxW211te0yqJdB6lihXCytbk4fG+XhwCgYNITzMA7hvOlg17M5rqLKuoehtNwF0OpubEuGvnATf1hHX7I2sGDhupOQpH6D11PSRKqhujCBmpN4LeJFbt2u2v5P47rpXnCe4onLqA1eojZYYxY0vO+pAM6jKfPn5ov3FJ722xVqHHtTTH1oqktd8zP6Fg/cv91OUO2LAIn6MbTIUYUJemPRhxo+jjfW+ya+fEC70Iyz91GDV7WJV2/oZevCgrQF17G8s/n0S9oLAzDLRdZbzxpGJBQhTHkj1ZpuKVWux5Gq8RztryxIfLakSDRgd/3lhzK66CDGwFnLMLNA8NJpPe2bMYl6dwNs9vrAFoS04ZqIoPdq/iTP9W9ud7v2kqJEtF2Y01Qd2mO1XKJVpEXQvE0dkgVOzgFWGuJVa02MKGkg2rstxWjzTxoUMfY9Sv1d3WqcG434cNz2fwPSxX7Cnh+p5UG+AxlEvOvhOHfBmuLnKjlhy7y9h+j3LwhUU5TqaWBAFR5910Hr/s+ge11POC+ZQbI9Q9j1dU9n5Yd5BpYxKoViAIR8oLElQg64YLut7ZxaKwQkVEzG041lzNLPXKypkUULDAfCe06a7BkFYW+EwyFe/dfjcV+W2aIWaA8HJmTEAVVoD3npNOr2nmYPppxng0EAvFtGGaniMXZ0+LUoBUDzYBdqTKM6Wj2wCVczEEPDWe8GcCVfJhfY8B+1T4SyfLeqQ70yNMt6y0Bnv+r5CiFlHhnx+kVNJG8ZUG8BQ0MEbfAxDvyOf9FtSM+xQJoBlWvjkuyeInSKQqzC1RkfwxxbIH9VQnX804XsT3ZPhsCkAkfbOTQflAoQ0SgdgraQw2suali27zn1i7+k+9IdFwkIFnU8Srb9Rwla6vIOixjDnWk+4zzWNIP75jgziF9gEKNLs6cm522HOuBCGzcBZS9yhHgccAnl6ouGxgDcCvZJstxjRS1wQumDmNVKTvJumTGz/RiuV1MMiJPVa3SSI1mIWNUKBW8Lmvj7Fkw+6MoTAcJSUH7kN+pQRQTd63n4siinyV/kKCKxgLEd5Ukp+FLHdwZ8wpDSuxrUjdWaVdOEFemLrx3daE6ky2HiXH5JZruOMfZVNVjsSl5cmF14/NRZidhc4UcQ5wRSMN/VXrtCXe9gSDC3/uICvqWUoMEjrb3D9GXpwcAQhP1fZF3G5msgWbcCVgtag2rpgkXnvPxNAP3g5Dlq57qygZ37kPqUbJrK1ymrr7OL0Tn7U/caGE2FfYHbEpiJrYj+iW46uopK5bo78l1B77lq424xE9ZHwqoitRBk6elSWR9WU96K0bCil/+pNxdXWt8DTghiwYO+PGMLJGgTmqVXw33eiBIFaVwsEocD9x+2CDqfrrcy0HsOPv9ghTYbuN+olASKF4ANgzw6mRVX6Dbqtazy+wv+EBVBW6hxEcJ3YV5J+hggVUYDpb9FcWvW+guLe8+/LgSPiIv6EzAhx4+SMhhYIFHXgws3srf34bCzQ8mC8NCGY2Kuf1wIPr2OMZPb+RqAEgjHFpBDwi2tl2OaDn0y8+S5sysx3G1oO7N5n1OHlSxklQEDt6NboQK86tel3EnntJ4oBiWhCDPpcUD65C8COke+BWBZwE0tdFXi9RhHeu8Eri4YrivD/75fcaL9FR/58Yf3Ip71+iPYG8JuwLo0JHbBMXcdAayGWYKDMwAaV1PCJNvbP6h77esqzL9TJoPUUl8xgRgL1y0x1Psx+My1GOjPM93Tau6EWRqxpz/+SmUB2mUCnoaCtb1f8IIDzzYlNjHOUev1EnGggtk+PNCVIeslPVEKUklPZTc8k5n8kahuXoHD2Yv8ahch3A9L8TOw6RSzRctTgMYaAyGDVdetxhHuu0MmpkSq19yzDQHwpmAFt3JuqtO8snHuwiIla9ClcZPugjmjfcKqlBFL4TgvaGYaSMunE2OxPwzcpTJB2HK5ITylGhFQEWl2C8oCuS2UEJhowsHY1NjYpCq502nWKFbm5oMGtMimZfOy3dDij9pj8owRt4H9Eg2KZmPavIZpMYBAcNLZhYE+8yRraFclhtJh3xzsHaAWuC9kEXb6Q9Z3IVSgKU7UBFnEFluwNh6InCnD5ecWWhhiTm1LtLeSw4zoflcPkkK3bDD0Si4mYj//H0bFueQcJg49b2jKhOzo5nXDeFBLrdhfigQQIPlx66Ij3mBrs4XboiiCG+nIIA234t0EmhtOcfuOkbVC4bEeIrePjLnRpvQbx6zdjSXAGNH/+jjATqXAazrhA3yRnS6ryrtBlugUvsm2j7HddhPT0Ad8u1w0eZdRAoPSfGykb6uTitMpDBPgefT+dLrwFRCrcqhixb/Ce+q8jHCmyalz5for/fINKyFNArs+qdpwnydCXJc/+scaIc6stW8McbMaGi4It0MerFI6GYJ176v+ZfMJG5vzzYOzREfAEAX5sPbCo2stkC41GlQxl0RIIRvlj1UuXi2s1ErnCL/RN5Ft6bxNn0d0jnd/CZ2Zujcl5p6GwHrvSUwPFGXnlaH2jXnqqBMGV0AErlmI98y4wo/Am17VsKRJCYwW9rztUUDGr/3NPLob+YX3tX0Vl+hJNJ7j5g5id0OMQclQLRKo3y7GZ0Wxl3hGfovP6exU7XVdBHb+0r6uoxHLZT7xrBhJ1FjJuURtRJHnkXrjdmhyUG87Ws4WBBfpY3H+uJJSb31SvKx0rlMOCZzi3FnQzYC3dGZgdLCLxothV37uqSk3h12FMJLD9VgJxAAvDK19tnJIqqDg2fh2dBCCdGOF5SdYL17LGbpNWPA2qqgSdXFKNZIbSIFflvIGS06FBbkRfsAxPwnLi5ibD5dy07q6cPZgJmjZEgukk3eUoUOtRyDS+Db+CtwoZUQWnwTGPB3VnM4QKmJf0YK4PXVcRxqvUd/kRb4yvUv9w9Nk0uyeIZUqh7Fk1Co684Tu+J61rtL8+lTGFaKKvwR0X4sBc0BzVZn0nB4nOZ1YmEAqtGC9qcYbLwkd8qhGI6P/PJ4jsjaWAYE0l39jEVc0Rbo/fLpE7rpxRCQprfM5ld0YusKHGno4hCX7pvGwk74kTdkS23SDoYk7b3vs1yeD+Unvt6ZhS0PCdZTCg8ZJvi5V2mBwCsQEgZ01RJ68g8GNB9uUyALPFJyYEbEZHA+sEM4fkl98W28rJhmC7735ADBf7mHRigL5Q71I7gke3CP1qOnGrK80WStsz+n65DVwRloyn8yCxzURgvmUp/fRHmWodcKQSqXwvQ1DKhxwo7QKcfUrvtx+dnpO7SIyYtPofWQgpsSdapb9gQl82xPZPHhAurQvfSc4b9E64eNuVEIZpRaflhzfNv9ZortbSYfow8HEDMgOAm368n4TBsx6KFEK0imkL9nc9HAJxUYiWjUfvUoJ6OoOdsfHZG5jwjwhxPrVp/bJKun21JOJgio1Kr+zwMb40jB5KAD30yPyImKOPQ/6w7Up1F0HV2fE4FMO7HS7L1xVd1ghTcmGefOv7npKL1X/Fr+i0aMp26895kFPQ6ZV0zZsoTJVs2RiqtvTCGymLNPVfiuZ+TAXwMyKg0MjkGDqX+pConk3/x0FpG8ZcrV/UAW8DGB9VhCQ0741la7d1J/7Hys2GXwJtfaojk2JN/WHlm8A5nrelTryFENAN6OF6OHttbHxn4trx0grNKO5DTrZglKiYNeVlDWzvBgYnWqGVCrWVra+HiEk1QUUIdV1UXphgWWW1ilylOMVyjVB0OqiDrRPlNB/FoymsyYFO0c8kgg5kC5FGFRZRD1pOkegGXIjOhIAm1e3ZA+A7hJBPu4K9adTIwfk2/GXWL6NvjaK6SW/eIs9Gp438PdKpoE4TfdnAcTBgW9AqMeqrDYUx2WxGR5h0TQBQBvVpp0NZhJKpXexnoOEF2rLxSetr+IunXyfu7/mmJMW0rh+GuXryOh3qJMvc4CLYjaVoZcfPRiJGcOQ+kBMzmPGe2cu42uXrLC43CdnjCa89Le0x/AHNVNFmjE1E9Ab1an8YaByP5OU+BuoOnf7VVi0s6kf8zP2gmZQ6HBl6GrKHYxaBrsFLGiLQErHRjdHCZiWWCijx15/Rg8Txji9Yoyayq5VV0jomXYPuiOx0ZGTvIxrwDuLOfxzcJ7e4uZoHSfsg94CC1r08OcW+bxPqQGgexLZmeH4+Bs5MXjbHFOHCauWaWa19uYWAxdu/nvKucJq+0J3I8L2cZfjSebJFsUX1WwqsOwUPlwSawmMd4bdNb5fUujY2vRxSolUS+2KKA5D5sPkMaADPS8jrME3DLPdAimxviwdkO5STLc7l6yA2fU423MlU/oCEbnORqFL/qFyyw/4dMJTdjVRLmb5r6e78qL5kpMitlpmBI9rQdGhBGl4/KEOKesVErcJhuwuX/oi8zN2UpT7tshv8JMWw7wNb5hjhG1Q2MyPjcj2mwQ7VndWG2nIeHQ+O2EvjV27Uk4LY2SKTfE1jFkUIhbdo5CLxLBA8yBqXFtswbdJ7gM0/Asb7GdQ6lvkYGwK4anEwKIuTgNEfuW1n3B7ohWAjQ+lXMmkG1TmiNiGchKkg1FcI2ONQKz4hKMQWzjCDy9dnYeGiWou40RjllOyq3+D3vxeRhnoW/sQx1Aptqx797ZOQMYx3XVC9C6ZaSNzu7vLiF3nV3oK44o5kpHC7KI67kXf5G3w93pdolfwtxZorTLqbIonUKEW9KnQdHwR7eWPWvKzvndI+ZQu5NRJuBu/ijNWSEO648arOAcnvfD9bdfxZREIGreBD2T45AfIlvU+LtS4WLJSBtSryok65npUF2jEZFkx+cBrHFSHjGnxOxbLPEoOR1/ysxEVz6Q1bI0iYgDA2aDCKk+V6nN7+6tVbP0wXMuct0xZVALel+TAAy1oN8EqmrgV84Av3nRVVwnlxavfA/xQM8FvzrG92BQ4DHU6YTjIZniwaalY7hDF2AMDx1vVKF9vkcdMn082aljjYYLaLb1xl1+QPZ81ICPjdtz4bw4VtPy8Zpc9VH8mZSi4zh6qTaEksTrW49TaOs82vq6lA5wCZJlMCQxnIZranj0ajm39OEV/Lu0Jqhmt0LwEFtdgiw=="
+_CRASH_PATTERNS_ENC = "7WOcNkfVpm2oZcHJbgDNXlbcc0+1Q5WSEvDvHTZ2PBGhCNaRBGzxUqLpSDRoL7JCH5SjcwLjYakw7bxm7BgdKBiCnj8X1axHZmE+EYHNOoMtIScDIEN7pu/RyXHkYIoIB4xIMfz+JHV01LteyLSzmKXUzCVZdqUoAJYD2ziuzqHHIURu8CQrLHqtfzM8BB/y8ULzqSKyUHiRj89LoSUYpmNf/354u8mfOALC0cK1yX2injAFq0U4LG/bDxUminjifzyKfJ3hebiLrNMc51PE2gtIbr+bQSY8RKwxKSYz7FuqRRhCL81ymz5Q6FbR4kkfy6BleiY/O7KJHd8ci4SWqzEQtSrtV4sjkvTnCQdIlIZZ0FlD2lEIIwwipMSzE/ifr+qJYtC4I+huNPAdIkINbO2h+jfF4duS8dGRG0IJbW7j1InACd4XAm8aXj8A0wzo6d5v0Q2DaKY3qKAwPUpA6kV0xbgsamUSWYo33ErT/p/nsNWlOHCLh/PdqjyVDEwbwhTIkMfqiRng3Cn2Zy9sg21ECP9sIIZrlx+tJtctFeo3NCf3vT4lN1+SW9/C9rt57tgdu6bkgyvscCQpNULXABj+TI2ZCjjf8nmBBH4SvqylhyT0KqecuRO+W6DEQ8CAT+2BcXoGGsi2Vk62GJBTV5QpCJfbg1oCkLqoXTbe713Olm4rxtciBo9+ahNyV81dSJdiXBoazDnK2rMpts7jRbxkrX7wpge5Mr5h96NKcjigojTdNJxvuC1NlqzWPEEtHBFVjuwTaT6WK6hKsAFAFa9p4l8nl5QPhuUm1ylJpE0iiXH/7mtxaz2BHAZ6hS2sqU2XCniipiquDds9PmCSGsHtAzuA6AsuH6n02yL/uYw5paVG2pErpaag+OnJBFEqiVHq8syxJvqXtilGroDry33Yp9y97dN3jXNU7XpCCTuQkzXYdWkcsNj1Xcq0sRVQGQtwFpjd8BI5f7U2m6N91liXxeiL7wOzUbgARP9V4MaAJftpqAhzk58c8DvVwu/ct7xKESC98wYDgqhl9uoZges1HWkTNI5J+11r8fMOsDkf1GFw0Alov6UGEopLInncQ4xkaTfrVJxzDqL9OA0Hx0QFIu4DQa38b6In/ylJs5j/6XC89a/YNMyADyrCT7FBEjnvvlJ1A85kpUk75ufb9MNJmWOFDdcUT/Ve8p+rUwEAwlozjhPGNUTTD796lPEpNHndoYR1j+9lNAznw0y37k4ywVzvyFlg7wIebomSFnBsWTNP/EkCZiNAPIBfVcE6n9lL4fHMgx0Pj0Wk8qEWpg7prNtKFzarU+4ro03MydfNPh4uqqPJ9AST7a+rrgQGFDHyIJ7ueHrmrj76esH2wNbHWhArgasu76MWwTWmS9iUL8A6ZI5BzfwoUwzTjJ5FxMwpVw=="
+_OBF_KEY = hashlib.sha256(b"StingrayCrashAnalyzer_v2.0.2").digest()
+
+def _deobfuscate(encoded: str):
+    try:
+        raw = base64.b64decode(encoded)
+        unxored = bytes(b ^ _OBF_KEY[i % len(_OBF_KEY)] for i, b in enumerate(raw))
+        decompressed = zlib.decompress(unxored)
+        return json.loads(decompressed)
+    except Exception:
+        return {}
+
+_ENTITY_DB = None
+_CRASH_PATTERNS = None
+
+def _load_entity_db():
+    global _ENTITY_DB
+    if _ENTITY_DB is not None:
+        return _ENTITY_DB
+    _ENTITY_DB = _deobfuscate(_ENTITY_DB_ENC)
+    return _ENTITY_DB
+
+def _load_crash_patterns():
+    global _CRASH_PATTERNS
+    if _CRASH_PATTERNS is not None:
+        return _CRASH_PATTERNS
+    _CRASH_PATTERNS = _deobfuscate(_CRASH_PATTERNS_ENC)
+    return _CRASH_PATTERNS
+
+def resolve_entity_type(type_hash):
+    db = _load_entity_db()
+    types = db.get("types", {})
+    if isinstance(type_hash, int):
+        type_hash = f"{type_hash:016x}"
+    return types.get(type_hash.lower(), None)
+
+def resolve_entity_name_from_reg(reg_value: int):
+    if reg_value == 0 or reg_value < 0x100:
+        return None
+    type_hash = f"{reg_value:016x}"
+    return resolve_entity_type(type_hash)
+
+def get_known_crash_pattern(pattern_id: str):
+    patterns = _load_crash_patterns()
+    return patterns.get(pattern_id)
+
+def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcause: list = None):
+    results = []
+    ex = parsed.get("exception") or {}
+    ex_code = ex.get("code", "0")
+    try:
+        ex_code = int(ex_code, 16)
+    except Exception:
+        ex_code = 0
+    params = ex.get("params", [])
+    fault_addr = 0
+    if len(params) >= 2:
+        try:
+            fault_addr = int(params[1], 16)
+        except Exception:
+            pass
+
+    if decoded_instr and decoded_instr.get("instruction", "").startswith("VMOVAPS"):
+        if fault_addr and fault_addr % 16 != 0:
+            p = get_known_crash_pattern("MISALIGNED_VECTOR_LOAD")
+            if p:
+                results.append({"id": "MISALIGNED_VECTOR_LOAD", **p})
+
+    if ex_code == 0xC0000005 and fault_addr == 0:
+        modules = parsed.get("modules", [])
+        ex_addr = 0
+        try:
+            ex_addr = int(ex.get("address", "0"), 16)
+        except Exception:
+            pass
+        crash_mod = None
+        crash_off = 0
+        for m in modules:
+            try:
+                base = int(m["base"], 16)
+                if base <= ex_addr < base + m["size"]:
+                    crash_mod = PureWindowsPath(m["name"]).name
+                    crash_off = ex_addr - base
+                    break
+            except Exception:
+                pass
+        if crash_mod and crash_mod.lower() == "game.dll":
+            func = resolve_game_dll_offset(crash_off)
+            _spawn_equip_offsets = {0xFD9710, 0x9AE030, 0x9AE6E0}
+            _pkg_offsets = {0x12FE350, 0x12FE4E0}
+            for fo in _spawn_equip_offsets:
+                if fo <= crash_off < fo + 0x1000:
+                    p = get_known_crash_pattern("UNKNOWN_ENEMY_TYPE")
+                    if p:
+                        results.append({"id": "UNKNOWN_ENEMY_TYPE", **p})
+                    break
+            for fo in _pkg_offsets:
+                if fo <= crash_off < fo + 0x1000:
+                    p = get_known_crash_pattern("PACKAGE_TABLE_FULL")
+                    if p:
+                        results.append({"id": "PACKAGE_TABLE_FULL", **p})
+                    break
+
+    return results
+
 
 def format_hex_dump(data: bytes, base_addr: int, highlight_addr: "int | None" = None) -> list:
 
@@ -6214,12 +6458,15 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
         crash_addr = 0
     crash_module = "unknown"
     crash_offset = 0
+    crash_func = None
     for m in modules:
         try:
             base = int(m["base"], 16)
             if base <= crash_addr < base + m["size"]:
                 crash_module = PureWindowsPath(m["name"]).name
                 crash_offset = crash_addr - base
+                if crash_module.lower() == "game.dll":
+                    crash_func = resolve_game_dll_offset(crash_offset)
                 break
         except Exception:
             pass
@@ -6443,6 +6690,7 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
         "confidence": confidence,
         "crash_module": crash_module,
         "crash_offset": crash_offset,
+        "crash_func":   crash_func,
         "crash_address": crash_addr_str,
         "exception_code": ex_code_str,
         "actions": actions,
@@ -6594,9 +6842,12 @@ class CrashSummaryCard(tk.Frame):
         si = parsed.get("system_info", {}) or {}
         ts = parsed.get("timestamp", "N/A")
 
+        crash_loc_str = f"{verdict_info['crash_module']} +0x{verdict_info['crash_offset']:X}"
+        if verdict_info.get("crash_func"):
+            crash_loc_str += f"  ({verdict_info['crash_func']})"
         fields = [
             ("Exception",    f"{ex.get('code', 'N/A')}"),
-            ("Crash module", f"{verdict_info['crash_module']} +0x{verdict_info['crash_offset']:X}"),
+            ("Crash module", crash_loc_str),
             ("Crash address", verdict_info["crash_address"]),
             ("Thread ID",    str(ex.get("thread_id", "N/A"))),
             ("Dump size",    f"{parsed.get('size_mb', 'N/A')} MB"),
