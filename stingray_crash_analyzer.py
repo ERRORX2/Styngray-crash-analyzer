@@ -4475,6 +4475,39 @@ def detect_mods(parsed: dict) -> dict:
                 "detail": f"File loaded from AppData (possible mod config): {name}",
             })
 
+    for m in modules:
+        name  = m.get("name", "")
+        nl    = name.lower().replace("/", "\\")
+        sn    = PureWindowsPath(name).name
+        if PureWindowsPath(name).suffix.lower() == ".exe":
+            continue
+
+        cs = m.get("checksum", "0x00000000")
+        if isinstance(cs, str):
+            try:
+                cs_val = int(cs, 16)
+            except Exception:
+                cs_val = 0
+        else:
+            cs_val = cs or 0
+
+        ts = m.get("timestamp", None)
+        ts_missing = (ts is None or ts == "N/A" or ts == 0 or ts == "0x00000000")
+
+        if cs_val == 0 and ts_missing:
+            size = m.get("size", 0)
+            size_str = f"{size/1024:.0f} KB" if isinstance(size, int) and size > 0 else "unknown"
+            indicators.append({
+                "type":   "dll_tamper",
+                "path":   name,
+                "detail": (
+                    f"Tampered DLL detected: {sn} ({size_str}) - "
+                    f"PE checksum is zeroed and build timestamp is missing. "
+                    f"Legitimate DLLs always have both; this file was modified "
+                    f"outside the build system."
+                ),
+            })
+
     lua_mods = _detect_lua_mods(parsed)
     for lm in lua_mods:
         detail = (
@@ -4503,6 +4536,7 @@ def detect_mods(parsed: dict) -> dict:
         "mod_manager": "HIGH",
         "unknown_dll": "HIGH",
         "lua_mod":     "HIGH",
+        "dll_tamper":  "HIGH",
         "appdata_mod": "MED",
     }
     for ind in unique:
@@ -6496,7 +6530,7 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
     is_mod_confirmed = (
         mods.get("has_mods") and mods.get("confidence") == "HIGH"
         and any(
-            i.get("type") in ("proxy_dll", "mod_manager", "unknown_dll")
+            i.get("type") in ("proxy_dll", "mod_manager", "unknown_dll", "dll_tamper")
             or (i.get("type") == "lua_mod" and i.get("tier") == "confirmed")
             for i in mods.get("indicators", [])
             if i.get("severity") == "HIGH"
@@ -6524,6 +6558,8 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
                 title = "Mod manager detected"
             elif kind == "lua_mod":
                 title = "Lua mod patch files detected"
+            elif kind == "dll_tamper":
+                title = "Tampered game DLL detected"
             else:
                 title = "Unknown DLL in game folder"
         else:
@@ -8434,6 +8470,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._folder_tree.tag_configure("unknown", foreground=RED)
         self._folder_tree.tag_configure("proxy", foreground=ORANGE)
         self._folder_tree.tag_configure("lua_mod", foreground=PURPLE)
+        self._folder_tree.tag_configure("tamper", foreground=RED, background="#3a1518")
         self._folder_tree.tag_configure("crash", foreground=RED, background="#3a1518")
         self._folder_tree.tag_configure("handler", foreground=TEXT_DIM)
         self._folder_tree.tag_configure("folder", foreground=ACCENT, font=(UI_FONT, 9, "bold"))
@@ -8499,6 +8536,10 @@ class CrashAnalyzerUI(_BaseWindow):
                         tag = "proxy"
                         type_label = "Proxy DLL"
                         status = "⚠ MOD"
+                    elif ind and ind.get("type") == "dll_tamper":
+                        tag = "tamper"
+                        type_label = "Tampered DLL"
+                        status = "⚠ TAMPERED"
                     elif ind and ind.get("type") == "mod_manager":
                         tag = "unknown"
                         type_label = "Mod manager"
@@ -8558,6 +8599,8 @@ class CrashAnalyzerUI(_BaseWindow):
                     icon = "🔥"
                 elif tag == "proxy":
                     icon = "⚡"
+                elif tag == "tamper":
+                    icon = "⚠"
                 elif tag == "unknown":
                     icon = "❓"
                 elif tag == "handler":
@@ -8664,6 +8707,8 @@ class CrashAnalyzerUI(_BaseWindow):
                          verdict_info, decoded_instr):
         self._parsed = parsed
         self._verdict_info = verdict_info
+        self._mods_cache = mods
+        self._rootcause_cache = rootcause
 
         self._verdict_banner.update_verdict(verdict_info)
 
@@ -9241,7 +9286,10 @@ class CrashAnalyzerUI(_BaseWindow):
         lines.append("CRASH SUMMARY")
         lines.append(f"  Exception code:   {ex.get('code', 'N/A')}")
         lines.append(f"  Crash address:    {v['crash_address']}")
-        lines.append(f"  Crash module:     {v['crash_module']} +0x{v['crash_offset']:X}")
+        crash_loc = f"{v['crash_module']} +0x{v['crash_offset']:X}"
+        if v.get("crash_func"):
+            crash_loc += f"  ({v['crash_func']})"
+        lines.append(f"  Crash module:     {crash_loc}")
         lines.append(f"  Thread ID:        {ex.get('thread_id', 'N/A')}")
         lines.append(f"  Dump size:        {p.get('size_mb', 'N/A')} MB")
         lines.append(f"  Modules:          {len(p.get('modules', []))}")
@@ -9264,7 +9312,11 @@ class CrashAnalyzerUI(_BaseWindow):
                     badge = " [pdata✓]"
                 elif verified is False:
                     badge = " [heuristic]"
-                lines.append(f"  {prefix} 0x{addr:016X}  {mod} +0x{off:X}{badge}")
+                func_name = resolve_game_dll_offset(off) if mod.lower() == "game.dll" else None
+                loc = f"{mod} +0x{off:X}"
+                if func_name:
+                    loc = f"{mod}!{func_name}"
+                lines.append(f"  {prefix} 0x{addr:016X}  {loc}{badge}")
             lines.append("")
 
         if True:
@@ -9273,8 +9325,35 @@ class CrashAnalyzerUI(_BaseWindow):
                 lines.append("ACTIVE GAME THREADS (likely trigger for suicides)")
                 for t in active[:8]:
                     rcx_note = "  <- RCX null" if t.get("rcx", 0) < 0x1000 else ""
-                    lines.append(f"  TID {t['tid']:6d}  {t['module']}+0x{t['offset']:X}{rcx_note}")
+                    tfunc = resolve_game_dll_offset(t["offset"]) if t["module"].lower() == "game.dll" else None
+                    tloc = f"{t['module']}+0x{t['offset']:X}"
+                    if tfunc:
+                        tloc = f"{t['module']}!{tfunc}"
+                    lines.append(f"  TID {t['tid']:6d}  {tloc}{rcx_note}")
                 lines.append("")
+
+        if self._parsed and hasattr(self, '_mods_cache'):
+            mods = self._mods_cache
+        else:
+            from stingray_crash_analyzer_unified import detect_mods
+            mods = detect_mods(p)
+
+        if mods.get("has_mods"):
+            lines.append("MOD DETECTION")
+            for ind in mods.get("indicators", []):
+                lines.append(f"  [{ind['severity']}] {ind['type']}: {ind['detail']}")
+            if mods.get("lua_mods"):
+                for lm in mods["lua_mods"]:
+                    lines.append(f"  [LUA] {PureWindowsPath(lm['path']).name} - {lm.get('reason', '')}")
+            lines.append("")
+
+        for finding in self._rootcause_cache if hasattr(self, '_rootcause_cache') else []:
+            lines.append(f"  [{finding.get('conf','?')}] {finding.get('title','')}")
+            detail = finding.get('detail', '')
+            if detail:
+                for dl in detail.split('\n'):
+                    lines.append(f"       {dl}")
+            lines.append("")
 
         notes = self._player_notes.get("1.0", "end-1c").strip()
         if notes:
