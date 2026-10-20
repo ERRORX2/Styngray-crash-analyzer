@@ -2895,13 +2895,34 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                                + (decoded_instr["explanation"] if decoded_instr else "")),
                     "link": None,
                 })
-            elif fault_addr > 0x00007F0000000000:
-                findings.append({"conf": "HIGH",
-                    "title": f"Out-of-bounds {op} at very high address 0x{fault_addr:016X}",
-                    "detail": ("The faulting address is in kernel/guard territory. "
-                               "This usually indicates stack overflow, a corrupted stack pointer, or a bad function pointer."),
-                    "link": None,
-                })
+            elif fault_addr >= 0xFFFFFFFF00000000 or fault_addr == 0xFFFFFFFFFFFFFFFF:
+                regs = ex.get("regs", {})
+                crash_reg_val = 0
+                crash_reg_name = ""
+                if decoded_instr and "explanation" in decoded_instr:
+                    expl = decoded_instr["explanation"]
+                    for r in ["RCX", "RAX", "RDX", "RBX", "RSI", "RDI", "R8", "R9", "R12", "R13", "R14", "R15"]:
+                        if f"({r})" in expl or f"[{r}+" in expl or f"through [{r}" in expl:
+                            crash_reg_val = regs.get(r.lower(), 0)
+                            crash_reg_name = r
+                            break
+                if crash_reg_name and crash_reg_val:
+                    findings.append({"conf": "HIGH",
+                        "title": f"Corrupt pointer {op} at 0x{fault_addr:016X}",
+                        "detail": (f"The faulting address 0x{fault_addr:016X} was produced by {crash_reg_name} = 0x{crash_reg_val:016X} "
+                                   f"plus a field offset. {crash_reg_name} holds a CORRUPT or FREED pointer - the object was "
+                                   f"likely freed or overwritten, and the garbage pointer value wrapped to this invalid address "
+                                   f"when the offset was added. This is a use-after-free or uninitialised pointer bug."),
+                        "link": None,
+                    })
+                else:
+                    findings.append({"conf": "HIGH",
+                        "title": f"Corrupt pointer {op} at 0x{fault_addr:016X}",
+                        "detail": (f"The faulting address 0x{fault_addr:016X} is the result of corrupt pointer arithmetic - "
+                                   f"a register held a garbage/freed pointer value, and adding a field offset produced this "
+                                   f"invalid address. This is a use-after-free or uninitialised pointer bug."),
+                        "link": None,
+                    })
             else:
                 findings.append({"conf": "MED",
                     "title": f"Bad pointer {op} at 0x{fault_addr:016X}",
@@ -3284,7 +3305,7 @@ def read_virtual_memory(parsed: dict, addr: int, size: int = 128) -> "bytes | No
     return None
 
 
-_GAME_DLL_FUNCTIONS_ENC = "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"
+_GAME_DLL_FUNCTIONS_ENC = "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"
 _GAME_DLL_FUNCTIONS = None
 
 def _load_game_dll_functions():
@@ -3853,14 +3874,24 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             return operand, idx, base_str
 
         operand, idx, base_str = _decode_mem_op_89(mod, rm, idx)
+        base_val = 0
+        if base_str and base_str != "RIP":
+            base_val = 0
+        if base_val == 0 and base_str != "RIP":
+            pointer_desc = f"The base address ({base_str}) was invalid - null, freed, or corrupt pointer write."
+        elif base_val < 0x1000 and base_str != "RIP":
+            pointer_desc = f"The base address ({base_str}) = 0x{base_val:X} (near-null) - likely a freed or uninitialised object pointer."
+        elif base_str != "RIP" and (base_val >> 40) not in (0, 1, 0x21, 0x1A, 0x1D, 0x1E, 0x1F, 0x38, 0x3B, 0xDF):
+            pointer_desc = (f"The base address ({base_str}) = 0x{base_val:016X} - CORRUPT or FREED pointer. "
+                          f"The object was likely freed or overwritten, leaving a garbage value.")
+        elif base_str != "RIP":
+            pointer_desc = (f"The base address ({base_str}) = 0x{base_val:016X} looks valid but the memory was not writable.")
+        else:
+            pointer_desc = f"The instruction wrote to a RIP-relative address."
         return {
             "is_suicide": False,
             "instruction": f"MOV {operand}, {src_reg}",
-            "explanation": (
-                f"Write through {operand}. "
-                f"The base address ({base_str}) was null or near-null at crash time - "
-                f"the object pointer was null, already freed, or never initialised."
-            ),
+            "explanation": f"Write through {operand}. {pointer_desc}",
             "confidence": "HIGH",
         }
 
@@ -3939,14 +3970,25 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
             return operand, idx, base_str
 
         operand, idx, base_str = _decode_mem_op(mod, rm, idx)
+        base_val = 0
+        if base_str and base_str != "RIP":
+            base_val = 0
+        if base_val == 0 and base_str != "RIP":
+            pointer_desc = f"The base address ({base_str}) was invalid - null, freed, or corrupt pointer read."
+        elif base_val < 0x1000 and base_str != "RIP":
+            pointer_desc = f"The base address ({base_str}) = 0x{base_val:X} (near-null) - likely a freed or uninitialised object pointer."
+        elif base_str != "RIP" and (base_val >> 40) not in (0, 1, 0x21, 0x1A, 0x1D, 0x1E, 0x1F, 0x38, 0x3B, 0xDF):
+            pointer_desc = (f"The base address ({base_str}) = 0x{base_val:016X} - CORRUPT or FREED pointer. "
+                          f"The object was likely freed or overwritten, leaving a garbage value in the register.")
+        elif base_str != "RIP":
+            pointer_desc = (f"The base address ({base_str}) = 0x{base_val:016X} looks valid but the memory was not readable - "
+                          f"it may have been freed or the page was unmapped.")
+        else:
+            pointer_desc = f"The instruction accessed memory at a RIP-relative address."
         return {
             "is_suicide": False,
             "instruction": f"MOV {dst_reg}, {operand}",
-            "explanation": (
-                f"Read through {operand}. "
-                f"The base address ({base_str}) was null or near-null at crash time - "
-                f"the object pointer was null, already freed, or never initialised."
-            ),
+            "explanation": f"Read through {operand}. {pointer_desc}",
             "confidence": "HIGH",
         }
 
@@ -4074,14 +4116,21 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
                     mem_op = f"[{pfx}{base_str}+...]"
                 instr = f"{mnemonic} {mem_op}, {xmm_reg}" if is_store else f"{mnemonic} {xmm_reg}, {mem_op}"
                 align_note = " MOVAPS requires 16-byte alignment - misalignment also causes this crash." if "MOVAPS" in mnemonic else ""
+                base_val = 0
+                if base_val == 0:
+                    ptr_desc = f"{pfx}{base_str} was invalid - null, freed, or corrupt pointer {'write' if is_store else 'read'} in a SIMD operation."
+                elif base_val < 0x1000:
+                    ptr_desc = f"{pfx}{base_str} = 0x{base_val:X} (near-null) - likely a freed or uninitialised object pointer."
+                elif (base_val >> 40) not in (0, 1, 0x21, 0x1A, 0x1D, 0x1E, 0x1F, 0x38, 0x3B, 0xDF):
+                    ptr_desc = (f"{pfx}{base_str} = 0x{base_val:016X} - CORRUPT or FREED pointer. "
+                              f"The object was likely freed or overwritten, leaving a garbage value.")
+                else:
+                    ptr_desc = (f"{pfx}{base_str} = 0x{base_val:016X} looks valid but the memory was not "
+                              f"{'writable' if is_store else 'readable'} - it may have been freed or the page was unmapped.")
                 return {
                     "is_suicide": False,
                     "instruction": instr,
-                    "explanation": (
-                        f"SSE {'store to' if is_store else 'load from'} {mem_op}. "
-                        f"If {pfx}{base_str} was null at crash time, this is a null pointer "
-                        f"{'write' if is_store else 'read'} in a SIMD operation.{align_note}"
-                    ),
+                    "explanation": f"SSE {'store to' if is_store else 'load from'} {mem_op}. {ptr_desc}{align_note}",
                     "confidence": "HIGH",
                 }
         return {
@@ -4096,6 +4145,114 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
         next_op = b[idx]
         STRING_OPS = {0xA4:"MOVSB", 0xA5:"MOVSD/Q", 0xA6:"CMPSB", 0xA7:"CMPSD/Q",
                       0xAA:"STOSB", 0xAB:"STOSD/Q", 0xAE:"SCASB", 0xAF:"SCASD/Q"}
+
+        if next_op == 0x0F and idx + 1 < len(b):
+            SSE_OPS = {
+                0x10: ("MOVUPS", "SSE unaligned load"),
+                0x11: ("MOVUPS", "SSE unaligned store"),
+                0x28: ("MOVAPS", "SSE aligned load"),
+                0x29: ("MOVAPS", "SSE aligned store"),
+                0x59: ("MULPS",  "SSE packed single multiply"),
+                0x58: ("ADDPS",  "SSE packed single add"),
+                0x5C: ("SUBPS",  "SSE packed single subtract"),
+                0x54: ("ANDPS",  "SSE packed bitwise AND"),
+                0x57: ("XORPS",  "SSE packed bitwise XOR"),
+                0x14: ("UNPCKLPS","SSE interleave low"),
+                0x15: ("UNPCKHPS","SSE interleave high"),
+            }
+            sse_op = b[idx + 1] if idx + 1 < len(b) else 0
+            if sse_op in SSE_OPS:
+                name, desc = SSE_OPS[sse_op]
+                has_modrm = idx + 2 < len(b)
+                if has_modrm:
+                    modrm = b[idx + 2]
+                    mod = (modrm >> 6) & 3
+                    rm = modrm & 7
+                    reg = (modrm >> 3) & 7
+                    REG_NAMES = ["XMM0","XMM1","XMM2","XMM3","XMM4","XMM5","XMM6","XMM7"]
+                    if mod == 0 and rm == 5:
+                        return {
+                            "is_suicide": False,
+                            "instruction": f"{name} {REG_NAMES[reg]}, [RIP+disp32]",
+                            "explanation": f"{desc}. The instruction reads/writes data at a RIP-relative address. Check if the target address is valid.",
+                            "confidence": "HIGH",
+                        }
+                    elif mod == 0 and rm != 4 and rm != 5:
+                        BASE_REGS = ["RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI"]
+                        base_val = 0
+                        if base_val == 0:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}]. {BASE_REGS[rm]} was invalid - null, freed, or corrupt pointer read in a SIMD operation.",
+                                "confidence": "HIGH",
+                            }
+                        elif base_val < 0x1000:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}]. {BASE_REGS[rm]} = 0x{base_val:X} (near-null) - likely a freed or uninitialised object pointer.",
+                                "confidence": "HIGH",
+                            }
+                        elif base_val >= 0xFFFFFFF000000000 or (base_val >> 40) not in (0, 1, 0x21, 0x1A, 0x1D, 0x1E, 0x1F):
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}]. {BASE_REGS[rm]} = 0x{base_val:016X} - this is a CORRUPT or FREED pointer (unusual address pattern). The object was likely freed or overwritten, leaving a garbage value in the register.",
+                                "confidence": "HIGH",
+                            }
+                        else:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}] = 0x{base_val:016X}. The address looks valid but the memory at that location was not readable - it may have been freed or the page was unmapped.",
+                                "confidence": "MED",
+                            }
+                    elif mod == 1 and rm != 4:
+                        BASE_REGS = ["RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI"]
+                        disp = b[idx + 3] if idx + 3 < len(b) else 0
+                        base_val = 0
+                        if base_val == 0:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}+0x{disp:X}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}+0x{disp:X}]. {BASE_REGS[rm]} was invalid - null, freed, or corrupt pointer read at field offset +0x{disp:X}.",
+                                "confidence": "HIGH",
+                            }
+                        elif base_val >= 0xFFFFFFF000000000:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}+0x{disp:X}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}+0x{disp:X}]. {BASE_REGS[rm]} = 0x{base_val:016X} - CORRUPT or FREED pointer. The object was likely freed, leaving a garbage value.",
+                                "confidence": "HIGH",
+                            }
+                        else:
+                            return {
+                                "is_suicide": False,
+                                "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}+0x{disp:X}]",
+                                "explanation": f"{desc} from [{BASE_REGS[rm]}+0x{disp:X}] = 0x{base_val:016X}. Reading field at offset +0x{disp:X} from an object. The object pointer looks valid but the memory was not readable.",
+                                "confidence": "MED",
+                            }
+                    elif mod == 2 and rm != 4:
+                        BASE_REGS = ["RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI"]
+                        import struct as _s
+                        disp = _s.unpack_from("<i", bytes(b[idx+3:idx+7]))[0] if idx + 7 <= len(b) else 0
+                        base_val = 0
+                        disp_str = f"+0x{disp:X}" if disp >= 0 else f"-0x{abs(disp):X}"
+                        return {
+                            "is_suicide": False,
+                            "instruction": f"{name} {REG_NAMES[reg]}, [{BASE_REGS[rm]}{disp_str}]",
+                            "explanation": f"{desc} from [{BASE_REGS[rm]}{disp_str}]. {BASE_REGS[rm]} = 0x{base_val:016X}.",
+                            "confidence": "MED",
+                        }
+
+            return {
+                "is_suicide": False,
+                "instruction": f"{rep_name} 0x0F {b[idx+1]:02X}",
+                "explanation": "SSE instruction. Check the source register for a corrupt or null pointer.",
+                "confidence": "MED",
+            }
+
         inner_op = STRING_OPS.get(next_op, f"op 0x{next_op:02X}")
         is_copy  = next_op in (0xA4, 0xA5)
         is_set   = next_op in (0xAA, 0xAB)
@@ -4333,7 +4490,7 @@ def detect_mods(parsed: dict) -> dict:
 
     KNOWN_GAME_DLLS = (
         NVIDIA_DLLS | AMD_DLLS | INTEL_DLLS | SYSTEM_CAPTURE_DLLS | {
-        "lua51.dll", "game.dll",
+        "lua51.dll", "game.dll", "runtime.dll",
         "steam_api64.dll", "steam_api.dll", "gameoverlayrenderer64.dll",
         "steamclient64.dll", "vstdlib_s64.dll", "tier0_s64.dll",
         "bink2w64.dll", "bink2w32.dll",
@@ -4351,6 +4508,8 @@ def detect_mods(parsed: dict) -> dict:
         "level_generation_pluginw64_release.dll",
         "level_generation_pluginw64_debug.dll",
         "easyanticheat.dll", "easyanticheat_launcher.dll",
+        "preloader.dll",
+        "eossdk-win64-shipping.dll",
         "dxcompiler.dll", "dxil.dll", "d3d12core.dll",
         "xaudio2_9.dll", "xaudio2_8.dll", "xaudio2_7.dll", "x3daudio1_7.dll",
         "mfplat.dll", "mfreadwrite.dll",
@@ -7800,8 +7959,12 @@ class CrashAnalyzerUI(_BaseWindow):
                     addr, mod, off = entry[0], entry[1], entry[2]
                     verified = None
                 badge = " [pdata ok]" if verified is True else (" [heuristic]" if verified is False else "")
+                func_name = resolve_game_dll_offset(off) if mod.lower() == "game.dll" else None
+                loc = f"{mod} +0x{off:X}"
+                if func_name:
+                    loc = f"{mod}!{func_name}"
                 prefix = "CRASH ->" if i == 0 else f"  #{i:02d}"
-                chain_details.append(f"{prefix}  0x{addr:016X}  {mod} +0x{off:X}{badge}")
+                chain_details.append(f"{prefix}  0x{addr:016X}  {loc}{badge}")
             if len(chain) > 8:
                 chain_details.append(f"  ... +{len(chain)-8} more frames")
 
