@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
+from tkinter import font as tkfont
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -41,6 +42,224 @@ def resource_path(*parts: str) -> Path:
     else:
         base = Path(__file__).parent
     return base / Path(*parts)
+
+
+_SETTINGS_DIR  = Path.home() / ".stingray_crash_analyzer"
+_SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
+
+_FONT_SCALE          = 1.0
+_DEFAULT_FONT_SCALE  = 1.0
+_MIN_FONT_SCALE      = 0.75
+_MAX_FONT_SCALE      = 2.5
+_FONT_SCALE_STEP     = 0.1
+
+_NAMED_FONTS: dict = {}
+_TTK_STYLE_BASE_FONTS: dict = {}
+_BASE_TAG_FONTS: dict = {}
+
+
+def _load_settings() -> None:
+    global _FONT_SCALE
+    try:
+        if _SETTINGS_FILE.exists():
+            with open(_SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f) or {}
+            s = float(data.get("font_scale", _DEFAULT_FONT_SCALE))
+            if _MIN_FONT_SCALE <= s <= _MAX_FONT_SCALE:
+                _FONT_SCALE = s
+    except Exception:
+        pass
+
+
+def _save_settings() -> None:
+    try:
+        _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"font_scale": _FONT_SCALE}, f)
+    except Exception:
+        pass
+
+
+def _parse_font_spec(ft):
+    if isinstance(ft, (tuple, list)) and len(ft) >= 2:
+        try:
+            family = str(ft[0])
+            size = ft[1]
+            if not isinstance(size, (int, float)):
+                return None
+            style_parts = []
+            for part in ft[2:]:
+                style_parts.extend(str(part).lower().split())
+            return (family, int(size), frozenset(style_parts))
+        except Exception:
+            return None
+    if isinstance(ft, str):
+        parts = ft.split()
+        size_idx = None
+        for i, part in enumerate(parts):
+            cleaned = part.lstrip("-")
+            if cleaned.isdigit():
+                size_idx = i
+                break
+        if size_idx is None:
+            return None
+        try:
+            family = " ".join(parts[:size_idx])
+            size = int(parts[size_idx])
+            style_parts = [p.lower() for p in parts[size_idx + 1:]]
+            return (family, size, frozenset(style_parts))
+        except Exception:
+            return None
+    return None
+
+
+def _scaled_size(base_size: int, scale: float) -> int:
+    scaled = int(round(base_size * scale))
+    if base_size < 0:
+        return -max(1, abs(scaled))
+    return max(6, scaled)
+
+
+def _get_or_create_named_font(family, base_size, style_set, scale):
+    key = (family, base_size, style_set)
+    f = _NAMED_FONTS.get(key)
+    if f is not None:
+        return f
+    name = f"sca_{len(_NAMED_FONTS)}_{family.replace(' ', '_')}_{base_size}"
+    kw = {"family": family, "size": _scaled_size(base_size, scale)}
+    if "bold" in style_set:
+        kw["weight"] = "bold"
+    if "italic" in style_set or "oblique" in style_set:
+        kw["slant"] = "italic"
+    if "underline" in style_set:
+        kw["underline"] = True
+    if "overstrike" in style_set:
+        kw["overstrike"] = True
+    try:
+        f = tkfont.Font(name=name, **kw)
+    except Exception:
+        try:
+            f = tkfont.Font(**kw)
+        except Exception:
+            return None
+    _NAMED_FONTS[key] = f
+    return f
+
+
+def _reconfigure_all_named_fonts(scale: float) -> None:
+    for (family, base_size, style_set), f in list(_NAMED_FONTS.items()):
+        try:
+            f.configure(size=_scaled_size(base_size, scale))
+        except Exception:
+            pass
+
+
+def _rescale_font_spec(ft, scale: float):
+    parsed = _parse_font_spec(ft)
+    if parsed is None:
+        return ft
+    family, base_size, style_set = parsed
+    new_size = _scaled_size(base_size, scale)
+    result = (family, new_size)
+    if style_set:
+        result = result + (" ".join(sorted(style_set)),)
+    return result
+
+
+def _register_ttk_style_font(style_obj, style_name: str, base_font,
+                             base_rowheight: "int | None" = None) -> None:
+    _TTK_STYLE_BASE_FONTS[style_name] = (style_obj, base_font, base_rowheight)
+
+
+def _reconfigure_ttk_styles(scale: float) -> None:
+    for name, (style_obj, base_font, base_rowheight) in list(_TTK_STYLE_BASE_FONTS.items()):
+        try:
+            style_obj.configure(name, font=_rescale_font_spec(base_font, scale))
+        except Exception:
+            pass
+        if base_rowheight:
+            try:
+                style_obj.configure(name, rowheight=max(14, int(round(base_rowheight * scale))))
+            except Exception:
+                pass
+
+
+def _rescale_tag_fonts(w, scale: float) -> None:
+    try:
+        tag_names = w.tag_names()
+    except Exception:
+        return
+    for tag in tag_names:
+        try:
+            cur = w.tag_configure(tag, "font")
+            if not cur:
+                continue
+            key = (id(w), tag)
+            base = _BASE_TAG_FONTS.get(key)
+            if base is None:
+                base = cur
+                _BASE_TAG_FONTS[key] = base
+            new = _rescale_font_spec(base, scale)
+            if new and new != cur:
+                w.tag_configure(tag, font=new)
+        except Exception:
+            pass
+
+
+def apply_font_scale(scale: float, root=None) -> float:
+    global _FONT_SCALE
+    scale = max(_MIN_FONT_SCALE, min(_MAX_FONT_SCALE, scale))
+    _FONT_SCALE = scale
+
+    _reconfigure_all_named_fonts(scale)
+    _reconfigure_ttk_styles(scale)
+
+    if root is None:
+        _save_settings()
+        return scale
+
+    def walk(w):
+        try:
+            keys = w.keys()
+        except Exception:
+            keys = []
+        if "font" in keys:
+            try:
+                nf = getattr(w, "_sca_named_font", None)
+                if nf is None:
+                    cur = w.cget("font")
+                    parsed = _parse_font_spec(cur)
+                    if parsed is not None:
+                        family, base_size, style_set = parsed
+                        nf = _get_or_create_named_font(
+                            family, base_size, style_set, scale)
+                        if nf is not None:
+                            w.configure(font=nf)
+                            try:
+                                w._sca_named_font = nf
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+        try:
+            if hasattr(w, "tag_names") and callable(getattr(w, "tag_configure", None)):
+                _rescale_tag_fonts(w, scale)
+        except Exception:
+            pass
+        try:
+            children = w.winfo_children()
+        except Exception:
+            children = []
+        for child in children:
+            walk(child)
+
+    try:
+        walk(root)
+    except Exception:
+        pass
+
+    _save_settings()
+    return scale
 
 
 LUA_TYPE_ID_SIGNATURE = bytes([
@@ -7545,6 +7764,13 @@ class CrashAnalyzerUI(_BaseWindow):
         self.bind_all("<Control-l>", lambda e: self.execute_action("open_log"))
         self.bind_all("<Control-o>", lambda e: self._open_file())
 
+        self.bind_all("<Control-equal>",  lambda e: self._increase_font())
+        self.bind_all("<Control-plus>",   lambda e: self._increase_font())
+        self.bind_all("<Control-minus>",  lambda e: self._decrease_font())
+        self.bind_all("<Control-Key-0>",  lambda e: self._reset_font())
+
+        _load_settings()
+
         self._parsed = None
         self._verdict_info = None
         self._load_generation = 0
@@ -7623,7 +7849,16 @@ class CrashAnalyzerUI(_BaseWindow):
                                   relief="flat", padx=12, pady=5,
                                   font=(UI_FONT, 9),
                                   cursor="hand2")
-        self._log_btn.pack(side="left")
+        self._log_btn.pack(side="left", padx=(0, 8))
+
+        self._settings_btn = tk.Button(btn_area, text="  Aa Settings  ",
+                                       command=self._open_settings_menu,
+                                       bg=BG3, fg=TEXT,
+                                       activebackground=BORDER, activeforeground=ACCENT,
+                                       relief="flat", padx=12, pady=5,
+                                       font=(UI_FONT, 9, "bold"),
+                                       cursor="hand2")
+        self._settings_btn.pack(side="left")
 
         tk.Frame(self, bg=ACCENT, height=2).pack(fill="x")
 
@@ -7643,6 +7878,7 @@ class CrashAnalyzerUI(_BaseWindow):
         style.map("TNotebook.Tab",
                   background=[("selected", BG)],
                   foreground=[("selected", ACCENT)])
+        _register_ttk_style_font(style, "TNotebook.Tab", (UI_FONT, 9))
 
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill="both", expand=True)
@@ -7691,6 +7927,8 @@ class CrashAnalyzerUI(_BaseWindow):
         self._status_var = tk.StringVar(value="Ready - drop a .dmp file to begin")
         tk.Label(status_inner, textvariable=self._status_var,
                  bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(side="left")
+
+        apply_font_scale(_FONT_SCALE, self)
 
     def _build_summary_tab(self):
         scrollable = ScrollableFrame(self._tab_summary, bg=BG)
@@ -8626,6 +8864,8 @@ class CrashAnalyzerUI(_BaseWindow):
         style.configure("Folder.Treeview.Heading", background=BG3, foreground=ACCENT,
                         font=(UI_FONT, 9, "bold"))
         style.map("Folder.Treeview", background=[("selected", BG3)])
+        _register_ttk_style_font(style, "Folder.Treeview", (UI_FONT, 9), base_rowheight=22)
+        _register_ttk_style_font(style, "Folder.Treeview.Heading", (UI_FONT, 9, "bold"))
         self._folder_tree.configure(style="Folder.Treeview")
 
         self._folder_tree.tag_configure("safe", foreground=GREEN)
@@ -8944,6 +9184,8 @@ class CrashAnalyzerUI(_BaseWindow):
         self._rebind_all_scrollable()
 
         self._nb.select(0)
+
+        apply_font_scale(_FONT_SCALE, self)
 
     def _display_dll_status_row(self, parsed: dict):
         for w in self._dll_status_frame.winfo_children():
@@ -9301,6 +9543,8 @@ class CrashAnalyzerUI(_BaseWindow):
                 tk.Label(summary_row, text=f"{short}: {v}",
                          bg=BG2, fg=c, font=(UI_MONO, 8)).pack(side="left", padx=(0, 16))
 
+        apply_font_scale(_FONT_SCALE, self._modules_inner)
+
     def _display_dred(self, parsed_dred, verdict):
         for w in self._tab_gpu.winfo_children():
             w.destroy()
@@ -9340,6 +9584,8 @@ class CrashAnalyzerUI(_BaseWindow):
                      font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(16, 4))
             tk.Label(inner, text=fix, bg=BG, fg=TEXT, font=(UI_FONT, 9),
                      wraplength=800, anchor="w", justify="left").pack(anchor="w", padx=20)
+
+        apply_font_scale(_FONT_SCALE, self)
 
 
     def execute_action(self, command: str):
@@ -11231,6 +11477,130 @@ class CrashAnalyzerUI(_BaseWindow):
             import traceback
             messagebox.showerror("Debugger Error",
                                  f"Failed to apply scenario:\n{e}\n\n{traceback.format_exc()[-800:]}")
+
+
+    def _open_settings_menu(self):
+        f9      = _rescale_font_spec((UI_FONT, 9), _FONT_SCALE)
+        f9_bold = _rescale_font_spec((UI_FONT, 9, "bold"), _FONT_SCALE)
+        menu = tk.Menu(self, tearoff=0, bg=BG2, fg=TEXT,
+                       activebackground=BG3, activeforeground=TEXT,
+                       borderwidth=1, relief="solid",
+                       font=f9)
+        pct = int(round(_FONT_SCALE * 100))
+        menu.add_command(label="A+   Increase Font Size      Ctrl + =",
+                         command=self._increase_font,
+                         font=f9)
+        menu.add_command(label="A-   Decrease Font Size      Ctrl + -",
+                         command=self._decrease_font,
+                         font=f9)
+        menu.add_separator()
+        menu.add_command(label="Reset Font Size               Ctrl + 0",
+                         command=self._reset_font,
+                         font=f9)
+        menu.add_separator()
+        menu.add_command(label="Font Settings\u2026",
+                         command=self._open_settings_dialog,
+                         font=f9)
+        menu.add_separator()
+        menu.add_command(label=f"Current size: {pct}%",
+                         state="disabled",
+                         font=f9_bold)
+
+        self.update_idletasks()
+        btn = self._settings_btn
+        x = btn.winfo_rootx()
+        y = btn.winfo_rooty() + btn.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _increase_font(self):
+        apply_font_scale(_FONT_SCALE + _FONT_SCALE_STEP, self)
+
+    def _decrease_font(self):
+        apply_font_scale(_FONT_SCALE - _FONT_SCALE_STEP, self)
+
+    def _reset_font(self):
+        apply_font_scale(_DEFAULT_FONT_SCALE, self)
+
+    def _open_settings_dialog(self):
+        dlg = tk.Toplevel(self)
+        dlg.title("Font Settings")
+        dlg.configure(bg=BG)
+        dlg.geometry("380x260")
+        dlg.resizable(False, False)
+        dlg.transient(self)
+        dlg.grab_set()
+
+        self.update_idletasks()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        w, h = 380, 260
+        x = self.winfo_rootx() + (self.winfo_width() - w) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - h) // 2
+        dlg.geometry(f"+{max(0, min(x, sw - w))}+{max(0, min(y, sh - h))}")
+
+        tk.Label(dlg, text="Font Size", bg=BG, fg=TEXT,
+                 font=(UI_FONT, 11, "bold")).pack(pady=(20, 2))
+
+        pct_var = tk.IntVar(value=int(round(_FONT_SCALE * 100)))
+        big = tk.Label(dlg, textvariable=pct_var, bg=BG, fg=ACCENT,
+                       font=(UI_MONO, 22, "bold"))
+        big.pack(pady=(0, 0))
+        tk.Label(dlg, text="percent", bg=BG, fg=TEXT_DIM,
+                 font=(UI_FONT, 8)).pack(pady=(0, 10))
+
+        scale_row = tk.Frame(dlg, bg=BG)
+        scale_row.pack(fill="x", padx=28)
+        tk.Label(scale_row, text="A", bg=BG, fg=TEXT_DIM,
+                 font=(UI_FONT, 8)).pack(side="left")
+        slider = tk.Scale(scale_row,
+                          from_=int(round(_MIN_FONT_SCALE * 100)),
+                          to=int(round(_MAX_FONT_SCALE * 100)),
+                          orient="horizontal",
+                          variable=pct_var,
+                          showvalue=False,
+                          bg=BG, fg=TEXT,
+                          troughcolor=BG3,
+                          highlightthickness=0,
+                          sliderrelief="flat",
+                          command=self._on_font_slider)
+        slider.pack(side="left", fill="x", expand=True, padx=10)
+        tk.Label(scale_row, text="A", bg=BG, fg=TEXT_DIM,
+                 font=(UI_FONT, 12, "bold")).pack(side="left")
+
+        hint = tk.Label(dlg,
+                        text="Range 75% - 250%.   Ctrl + = / - to adjust quickly.",
+                        bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8))
+        hint.pack(pady=(8, 6))
+
+        btn_row = tk.Frame(dlg, bg=BG)
+        btn_row.pack(fill="x", padx=28, pady=(0, 18))
+        tk.Button(btn_row, text="Reset", command=self._reset_font,
+                  bg=BG3, fg=TEXT_DIM, activebackground=BORDER,
+                  activeforeground=TEXT, relief="flat", padx=14, pady=5,
+                  font=(UI_FONT, 9), cursor="hand2").pack(side="left")
+        tk.Button(btn_row, text="Done", command=dlg.destroy,
+                  bg=ACCENT, fg="white", activebackground=ACCENT2,
+                  relief="flat", padx=18, pady=5,
+                  font=(UI_FONT, 9, "bold"), cursor="hand2").pack(side="right")
+
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        apply_font_scale(_FONT_SCALE, dlg)
+
+    def _on_font_slider(self, val):
+        try:
+            cancel_id = getattr(self, "_font_slider_after", None)
+            if cancel_id is not None:
+                try:
+                    self.after_cancel(cancel_id)
+                except Exception:
+                    pass
+            target = int(val) / 100.0
+            self._font_slider_after = self.after(
+                25, lambda: apply_font_scale(target, self))
+        except Exception:
+            apply_font_scale(int(val) / 100.0, self)
 
 
     def _status(self, msg: str, busy: bool = False):
