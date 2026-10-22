@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
-from tkinter import font as tkfont
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -53,7 +52,6 @@ _MIN_FONT_SCALE      = 0.75
 _MAX_FONT_SCALE      = 2.5
 _FONT_SCALE_STEP     = 0.1
 
-_NAMED_FONTS: dict = {}
 _TTK_STYLE_BASE_FONTS: dict = {}
 _BASE_TAG_FONTS: dict = {}
 
@@ -120,40 +118,6 @@ def _scaled_size(base_size: int, scale: float) -> int:
     return max(6, scaled)
 
 
-def _get_or_create_named_font(family, base_size, style_set, scale):
-    key = (family, base_size, style_set)
-    f = _NAMED_FONTS.get(key)
-    if f is not None:
-        return f
-    name = f"sca_{len(_NAMED_FONTS)}_{family.replace(' ', '_')}_{base_size}"
-    kw = {"family": family, "size": _scaled_size(base_size, scale)}
-    if "bold" in style_set:
-        kw["weight"] = "bold"
-    if "italic" in style_set or "oblique" in style_set:
-        kw["slant"] = "italic"
-    if "underline" in style_set:
-        kw["underline"] = True
-    if "overstrike" in style_set:
-        kw["overstrike"] = True
-    try:
-        f = tkfont.Font(name=name, **kw)
-    except Exception:
-        try:
-            f = tkfont.Font(**kw)
-        except Exception:
-            return None
-    _NAMED_FONTS[key] = f
-    return f
-
-
-def _reconfigure_all_named_fonts(scale: float) -> None:
-    for (family, base_size, style_set), f in list(_NAMED_FONTS.items()):
-        try:
-            f.configure(size=_scaled_size(base_size, scale))
-        except Exception:
-            pass
-
-
 def _rescale_font_spec(ft, scale: float):
     parsed = _parse_font_spec(ft)
     if parsed is None:
@@ -211,34 +175,39 @@ def apply_font_scale(scale: float, root=None) -> float:
     scale = max(_MIN_FONT_SCALE, min(_MAX_FONT_SCALE, scale))
     _FONT_SCALE = scale
 
-    _reconfigure_all_named_fonts(scale)
     _reconfigure_ttk_styles(scale)
 
     if root is None:
         _save_settings()
         return scale
 
-    def walk(w):
+    stack = [root]
+    while stack:
+        w = stack.pop()
         try:
             keys = w.keys()
         except Exception:
             keys = []
         if "font" in keys:
             try:
-                nf = getattr(w, "_sca_named_font", None)
-                if nf is None:
-                    cur = w.cget("font")
-                    parsed = _parse_font_spec(cur)
+                base = getattr(w, "_sca_base_font", None)
+                if base is None:
+                    raw = w.cget("font")
+                    parsed = _parse_font_spec(raw)
                     if parsed is not None:
                         family, base_size, style_set = parsed
-                        nf = _get_or_create_named_font(
-                            family, base_size, style_set, scale)
-                        if nf is not None:
-                            w.configure(font=nf)
-                            try:
-                                w._sca_named_font = nf
-                            except Exception:
-                                pass
+                        base = (family, base_size)
+                        if style_set:
+                            base = base + (" ".join(sorted(style_set)),)
+                    else:
+                        base = raw
+                    try:
+                        w._sca_base_font = base
+                    except Exception:
+                        pass
+                new = _rescale_font_spec(base, scale)
+                if new and new != base:
+                    w.configure(font=new)
             except Exception:
                 pass
         try:
@@ -247,16 +216,9 @@ def apply_font_scale(scale: float, root=None) -> float:
         except Exception:
             pass
         try:
-            children = w.winfo_children()
+            stack.extend(w.winfo_children())
         except Exception:
-            children = []
-        for child in children:
-            walk(child)
-
-    try:
-        walk(root)
-    except Exception:
-        pass
+            pass
 
     _save_settings()
     return scale
@@ -447,7 +409,7 @@ EXCEPTION_CODES = {
 }
 
 EXCEPTION_HEADLINES = {
-    0xC000001D: "The game crashed because the CPU tried to execute an invalid instruction - usually a sign of corrupted code in memory or a JIT/codegen bug.",
+    0xC000001D: "The game crashed because the CPU tried to execute an invalid instruction. When EAC is active, this is almost always EAC's anti-tamper detection - EAC deliberately executes a privileged instruction to crash the process after detecting code modification. Check the Evidence tab for 'EAC anti-tamper detection'.",
     0xC0000034: "The game crashed because it tried to open a named system object (event, mutex, etc.) that doesn't exist.",
     0xC000008C: "The game crashed because it accessed an array using an index outside its valid bounds.",
     0xC000008E: "The game crashed due to a floating-point division by zero in game or engine code.",
@@ -471,6 +433,9 @@ EXCEPTION_HEADLINES = {
     0x80000001: "The game's stack came within a guard page of overflowing - this is an early warning sign of the same cause as a stack overflow (likely infinite recursion).",
     0x80000002: "The game crashed because the CPU tried to access memory at an address that wasn't properly aligned for the data type being read or written.",
     0x40010005: "This isn't a crash - it's a Ctrl+C signal sent to a console application, which Windows reports as an exception even though nothing went wrong.",
+    0xC0000005: "The game crashed with an access violation. In Stingray, this is almost always the engine's 'suicide' mechanism - it deliberately dereferences a null pointer to terminate after detecting an internal error. Check the Evidence tab for 'Engine suicide' before treating this as a real null-deref bug.",
+    0xC00000FD: "The game crashed due to a stack overflow - the stack pointer moved past the stack's allocated size, usually caused by infinite recursion or an extremely deep call chain.",
+    0xC000001D: "The game crashed because the CPU tried to execute an invalid instruction. When EAC is active, this is almost always EAC's anti-tamper detection - EAC deliberately executes a privileged instruction (LGDT/SGDT) to crash the process after detecting code modification (NOP-patching). Check the Evidence tab for 'EAC anti-tamper detection'.",
 }
 
 STINGRAY_PATTERNS = {
@@ -858,6 +823,118 @@ def parse_minidump(path: str) -> dict:
             pid    = struct.unpack_from("<I", data, srva + 4)[0]
             if mflags & 1:
                 result["process_id"] = pid
+            misc = {"flags1": mflags, "process_id": pid}
+            if mflags & 0x1 and srva + 20 <= len(data):
+                misc["create_time"] = struct.unpack_from("<I", data, srva + 8)[0]
+                misc["user_time"]   = struct.unpack_from("<I", data, srva + 12)[0]
+                misc["kernel_time"] = struct.unpack_from("<I", data, srva + 16)[0]
+            if mflags & 0x4 and srva + 40 <= len(data):
+                misc["processor_max_mhz"]     = struct.unpack_from("<I", data, srva + 32)[0]
+                misc["processor_current_mhz"] = struct.unpack_from("<I", data, srva + 36)[0]
+            if mflags & 0x8 and srva + 56 <= len(data):
+                misc["process_integral_time"] = struct.unpack_from("<I", data, srva + 48)[0]
+            result["misc_info"] = misc
+
+        if stype == 16 and srva + 16 <= len(data):
+            mi_hdr   = struct.unpack_from("<I", data, srva)[0]
+            mi_entry = struct.unpack_from("<I", data, srva + 4)[0]
+            mi_count = struct.unpack_from("<Q", data, srva + 8)[0]
+            vad_list = []
+            for v in range(min(mi_count, 100000)):
+                voff = srva + mi_hdr + v * mi_entry
+                if voff + 48 > len(data): break
+                vbase  = struct.unpack_from("<Q", data, voff)[0]
+                vsize  = struct.unpack_from("<Q", data, voff + 24)[0]
+                vstate = struct.unpack_from("<I", data, voff + 32)[0]
+                vprot  = struct.unpack_from("<I", data, voff + 36)[0]
+                vtype  = struct.unpack_from("<I", data, voff + 40)[0]
+                vad_list.append((vbase, vsize, vstate, vprot, vtype))
+            result["vad_list"] = vad_list
+
+        if stype == 17 and srva + 12 <= len(data):
+            ti_hdr   = struct.unpack_from("<I", data, srva)[0]
+            ti_entry = struct.unpack_from("<I", data, srva + 4)[0]
+            ti_count = struct.unpack_from("<I", data, srva + 8)[0]
+            ti_list  = []
+            for v in range(min(ti_count, 2048)):
+                toff2 = srva + 12 + v * ti_entry
+                if toff2 + ti_entry > len(data): break
+                ti_tid   = struct.unpack_from("<I", data, toff2)[0]
+                ti_flags = struct.unpack_from("<I", data, toff2 + 4)[0]
+                ti_status= struct.unpack_from("<I", data, toff2 + 8)[0]
+                ti_pri   = struct.unpack_from("<I", data, toff2 + 12)[0]
+                ti_start = struct.unpack_from("<Q", data, toff2 + 16)[0]
+                ti_aff   = struct.unpack_from("<Q", data, toff2 + 24)[0]
+                ti_list.append({
+                    "tid": ti_tid, "start_address": ti_start,
+                    "priority": ti_pri, "affinity": ti_aff,
+                    "dump_flags": ti_flags, "dump_status": ti_status,
+                })
+            result["thread_info_list"] = ti_list
+
+        if stype in (810699600, 2119322448):
+            result.setdefault("_eac_streams", []).append({
+                "type": stype, "size": ssize, "rva": srva,
+            })
+
+        if stype == 13 and srva + 8 <= len(data):
+            ft_hdr  = struct.unpack_from("<I", data, srva)[0]
+            ft_desc = struct.unpack_from("<I", data, srva + 4)[0]
+            ft_tables = []
+            off = srva + ft_hdr
+            while off + ft_desc <= len(data) and off + ft_desc <= srva + ssize:
+                min_addr = struct.unpack_from("<Q", data, off)[0]
+                max_addr = struct.unpack_from("<Q", data, off + 8)[0]
+                entry_base = struct.unpack_from("<Q", data, off + 16)[0]
+                entry_count = struct.unpack_from("<I", data, off + 24)[0]
+                if min_addr == 0 and max_addr == 0:
+                    break
+                ft_tables.append({
+                    "min_addr": min_addr, "max_addr": max_addr,
+                    "entry_base": entry_base, "entry_count": entry_count,
+                })
+                off += ft_desc
+                if len(ft_tables) > 64:
+                    break
+            result["function_tables"] = ft_tables
+
+        if stype == 21 and srva + 8 <= len(data):
+            tk_rev = struct.unpack_from("<H", data, srva)[0]
+            tk_tok_size = struct.unpack_from("<I", data, srva + 4)[0]
+            tk_raw = data[srva + 8:srva + 8 + min(tk_tok_size, 512)]
+            sid_str = ""
+            idx = tk_raw.find(b"\x01\x01\x00\x00\x00\x00\x00\x05")
+            if idx >= 0 and idx + 8 <= len(tk_raw):
+                sub_count = tk_raw[idx + 1]
+                sid_parts = ["1", "5"]
+                for si in range(min(sub_count, 8)):
+                    so = idx + 8 + si * 4
+                    if so + 4 <= len(tk_raw):
+                        sid_parts.append(str(struct.unpack_from("<I", tk_raw, so)[0]))
+                sid_str = "S-" + "-".join(sid_parts)
+            if not sid_str:
+                idx2 = tk_raw.find(b"\x01\x01\x00\x00\x00\x00\x00\x01")
+                if idx2 >= 0 and idx2 + 8 <= len(tk_raw):
+                    sub_count = tk_raw[idx2 + 1]
+                    sid_parts = ["1", "1"]
+                    for si in range(min(sub_count, 8)):
+                        so = idx2 + 8 + si * 4
+                        if so + 4 <= len(tk_raw):
+                            sid_parts.append(str(struct.unpack_from("<I", tk_raw, so)[0]))
+                    sid_str = "S-" + "-".join(sid_parts)
+            result["token_info"] = {"token_size": tk_tok_size, "sid": sid_str}
+
+        if stype == 22 and srva + 56 <= len(data):
+            smi = {}
+            smi["revision"] = struct.unpack_from("<H", data, srva)[0]
+            smi["flags"]    = struct.unpack_from("<H", data, srva + 2)[0]
+            smi["total_physical"]     = struct.unpack_from("<Q", data, srva + 8)[0]
+            smi["available_physical"] = struct.unpack_from("<Q", data, srva + 16)[0]
+            smi["total_pagefile"]     = struct.unpack_from("<Q", data, srva + 24)[0]
+            smi["available_pagefile"] = struct.unpack_from("<Q", data, srva + 32)[0]
+            smi["total_virtual"]      = struct.unpack_from("<Q", data, srva + 40)[0]
+            smi["available_virtual"]  = struct.unpack_from("<Q", data, srva + 48)[0]
+            result["system_memory_info"] = smi
 
         if stype == 3 and srva + 4 <= len(data):
             nthreads = struct.unpack_from("<I", data, srva)[0]
@@ -2963,6 +3040,213 @@ def _active_game_threads_at_crash(parsed: dict) -> list:
         })
     return result
 
+
+EAC_STREAM_TYPES = {810699600, 2119322448}
+
+VAD_STATE_NAMES = {0x1000: "COMMIT", 0x2000: "RESERVE", 0x10000: "FREE"}
+VAD_PROT_NAMES = {
+    0x01: "NOACCESS", 0x02: "READONLY", 0x04: "READWRITE", 0x08: "WRITECOPY",
+    0x10: "EXECUTE", 0x20: "EXECUTE_READ", 0x40: "EXECUTE_READWRITE", 0x80: "EXECUTE_WRITECOPY",
+}
+VAD_TYPE_NAMES = {0x20000: "PRIVATE", 0x40000: "MAPPED", 0x1000000: "IMAGE"}
+
+
+def _detect_eac_and_vad(parsed: dict, crash_addr: int) -> list:
+    findings = []
+
+    eac_streams = parsed.get("_eac_streams", [])
+    has_eac_streams = len(eac_streams) >= 2
+    has_vad = bool(parsed.get("vad_list"))
+    has_thread_info = bool(parsed.get("thread_info_list"))
+
+    if has_eac_streams:
+        stream_desc = ", ".join(f"type {s['type']} ({s['size']}B)" for s in eac_streams)
+        findings.append({"conf": "HIGH",
+            "title": "Dump captured by EasyAntiCheat (EAC)",
+            "detail": (
+                f"This dump was captured by EasyAntiCheat, not by the game's own crash handler. "
+                f"EAC-specific streams detected: {stream_desc}. "
+                f"EAC captures richer dump data than the game does - this dump includes "
+                f"MemoryInfoList (VAD/page-protection data){' and ThreadInfoList (thread start addresses)' if has_thread_info else ''}. "
+                f"Note: EAC injects hooks into private executable memory and uses guard pages for "
+                f"tamper detection. If the crash is inside unmapped or private-executable memory, "
+                f"it may be crashing inside an EAC hook rather than game code."
+            ),
+            "link": None,
+        })
+
+    if has_vad and crash_addr:
+        crash_vad = None
+        for (vbase, vsize, vstate, vprot, vtype) in parsed["vad_list"]:
+            if vbase <= crash_addr < vbase + vsize:
+                crash_vad = (vbase, vsize, vstate, vprot, vtype)
+                break
+
+        if crash_vad:
+            vbase, vsize, vstate, vprot, vtype = crash_vad
+            state_s = VAD_STATE_NAMES.get(vstate, f"0x{vstate:X}")
+            prot_s  = VAD_PROT_NAMES.get(vprot & 0xFF, f"0x{vprot:X}")
+            type_s  = VAD_TYPE_NAMES.get(vtype, f"0x{vtype:X}")
+            is_private_exec = (vtype == 0x20000 and (vprot & 0xFF) in (0x10, 0x20, 0x40, 0x80))
+            is_guard = bool(vprot & 0x100)
+
+            if is_private_exec:
+                findings.append({"conf": "HIGH",
+                    "title": "Crash in private executable memory (JIT code or injected hook)",
+                    "detail": (
+                        f"The crash address 0x{crash_addr:016X} is in a PRIVATE EXECUTABLE memory "
+                        f"region (0x{vbase:012X}, {vsize//1024} KB) that is NOT backed by any "
+                        f"loaded module. This is dynamically-generated code - either JIT-compiled "
+                        f"Lua/shader bytecode, or an injected hook (e.g. from EAC, Discord overlay, "
+                        f"or ReShade). The crash is NOT in any DLL. Protection: {prot_s}, "
+                        f"Type: {type_s}."
+                    ),
+                    "link": None,
+                })
+            if is_guard:
+                findings.append({"conf": "HIGH",
+                    "title": "Crash address is on a PAGE_GUARD-protected region",
+                    "detail": (
+                        f"The crash address 0x{crash_addr:016X} is in a memory region with the "
+                        f"PAGE_GUARD protection bit set. Guard pages are used for two purposes: "
+                        f"(1) stack overflow detection - the OS places a guard page at the end of "
+                        f"the stack; (2) anti-tamper/anti-debug traps - EAC and other protection "
+                        f"systems place guard pages on code pages to detect modification. "
+                        f"Region: 0x{vbase:012X} ({vsize//1024} KB), base protection: {prot_s}, "
+                        f"type: {type_s}."
+                    ),
+                    "link": None,
+                })
+
+    misc = parsed.get("misc_info") or {}
+    if misc.get("processor_current_mhz") and misc.get("processor_max_mhz"):
+        cur = misc["processor_current_mhz"]
+        mx  = misc["processor_max_mhz"]
+        if mx > 0 and cur < mx * 0.1:
+            findings.append({"conf": "LOW",
+                "title": f"CPU at low clock at crash time ({cur} MHz / {mx} MHz max)",
+                "detail": (
+                    f"The CPU was reporting {cur} MHz out of a max of {mx} MHz at crash time. "
+                    f"This may indicate an idle C-state reading (the processor dropped to its "
+                    f"lowest frequency just before the crash was captured), or genuine thermal "
+                    f"throttling. If the crash is timing-related (TDR, audio stutter, desync), "
+                    f"check cooling and power settings. If not, this reading can be ignored."
+                ),
+                "link": None,
+            })
+
+    ti = parsed.get("thread_info_list") or []
+    if ti:
+        modules = parsed.get("modules", [])
+        unbacked = 0
+        for t in ti:
+            sa = t.get("start_address", 0)
+            in_mod = any(int(m["base"], 16) <= sa < int(m["base"], 16) + m["size"]
+                         for m in modules)
+            if not in_mod:
+                unbacked += 1
+        if unbacked > 0 and unbacked >= len(ti) * 0.5:
+            findings.append({"conf": "MED",
+                "title": f"{unbacked}/{len(ti)} thread start addresses not in any loaded module",
+                "detail": (
+                    f"{unbacked} of {len(ti)} threads have start addresses that do not fall "
+                    f"within any loaded module's address range. This is expected when EAC is "
+                    f"active - EAC hooks thread creation and redirects start addresses into "
+                    f"private/injected memory. This is not itself a crash cause, but confirms "
+                    f"EAC's deep instrumentation is active."
+                ),
+                "link": None,
+            })
+
+    smi = parsed.get("system_memory_info") or {}
+    if smi.get("total_physical"):
+        tp = smi["total_physical"]
+        ap = smi.get("available_physical", 0)
+        if tp > 0 and ap < tp * 0.1:
+            findings.append({"conf": "MED",
+                "title": f"System memory nearly exhausted ({ap/1024/1024/1024:.1f} GB free / {tp/1024/1024/1024:.1f} GB total)",
+                "detail": (
+                    f"Only {ap/1024/1024/1024:.1f} GB of {tp/1024/1024/1024:.1f} GB physical RAM "
+                    f"was available at crash time ({ap*100//tp}% free). Low memory can cause "
+                    f"allocation failures, page file exhaustion, and out-of-memory crashes. "
+                    f"Close other applications and check the page file size."
+                ),
+                "link": None,
+            })
+
+    ex = parsed.get("exception") or {}
+    try:
+        ex_code = int(ex.get("code", "0"), 16)
+    except (ValueError, TypeError):
+        ex_code = 0
+    ex_regs = ex.get("regs", {}) or {}
+
+    if ex_code == 0xC000001D and has_eac_streams:
+        nop_sled = False
+        nop_reg = ""
+        for rname in ["rax","rbx","rcx","rdx","rsi","rdi","r8","r9","r10","r11","r12","r13","r14","r15"]:
+            rval = ex_regs.get(rname, 0)
+            if (rval & 0xFFFFFFFF) == 0x90909090:
+                nop_sled = True
+                nop_reg = rname.upper()
+                break
+
+        imem = None
+        try:
+            imem = sca_read_vmem_for_eac(parsed, crash_addr, 8)
+        except Exception:
+            pass
+
+        is_privileged_opcode = False
+        if imem and len(imem) >= 2 and imem[0] == 0x0F and imem[1] == 0x01:
+            is_privileged_opcode = True
+
+        if nop_sled or is_privileged_opcode:
+            detail_parts = [
+                "EAC detected code tampering and deliberately crashed the process.",
+                "This is NOT a game bug - EAC's anti-cheat protection detected that game code",
+                "was modified (patched with NOP instructions, 0x90) and executed a privileged",
+                "instruction to terminate the process.",
+            ]
+            if nop_sled:
+                detail_parts.append(f"\nDetection signal: {nop_reg} = 0x90909090 (NOP sled - code was overwritten with NOPs).")
+            if is_privileged_opcode:
+                detail_parts.append("\nCrash instruction: 0F 01 (LGDT/SGDT/LIDT/SIDT - a privileged CPU instruction")
+                detail_parts.append("that is illegal in user mode. EAC executes this deliberately to crash.")
+
+            hook_region_size = 0
+            for (vbase, vsize, vstate, vprot, vtype) in (parsed.get("vad_list") or []):
+                if vbase <= crash_addr < vbase + vsize:
+                    hook_region_size = vsize
+                    break
+            if hook_region_size == 8192:
+                detail_parts.append(f"\nCrash address 0x{crash_addr:016X} is in an 8KB private EXECUTE_READWRITE region")
+                detail_parts.append("- this is EAC's signature hook page. EAC allocates exactly 8KB of private")
+                detail_parts.append("RWX memory to hold its anti-tamper crash handler.")
+            else:
+                detail_parts.append(f"\nCrash address 0x{crash_addr:016X} is in a small private EXECUTE_READWRITE region")
+                detail_parts.append("(EAC's injected hook code, not game code).")
+            detail_parts.append("\nThis means someone or something modified the game's code in memory:")
+            detail_parts.append("  - A mod, trainer, or cheat tool patched game code with NOPs")
+            detail_parts.append("  - A hook was installed and then removed, leaving NOPs behind")
+            detail_parts.append("  - A debugger or code injection tool modified instructions")
+            detail_parts.append("\nFix: Remove all mods, trainers, and code injection tools. Verify game files")
+            detail_parts.append("through Steam. If you weren't using any mods, scan for malware that may")
+            detail_parts.append("be injecting code into the game process.")
+
+            findings.append({"conf": "HIGH",
+                "title": "EAC anti-tamper detection - code modification detected",
+                "detail": "\n".join(detail_parts),
+                "link": None,
+            })
+
+    return findings
+
+
+def sca_read_vmem_for_eac(parsed, addr, size):
+    return read_virtual_memory(parsed, addr, size)
+
+
 def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
 
     findings = []
@@ -3387,6 +3671,14 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                        f"FIX: {kp['fix']}"),
             "link": None,
         })
+
+    try:
+        _crash_addr_for_vad = int(ex.get("address", "0"), 16)
+    except Exception:
+        _crash_addr_for_vad = 0
+    eac_findings = _detect_eac_and_vad(parsed, _crash_addr_for_vad)
+    for ef in eac_findings:
+        findings.insert(0, ef)
 
     if not findings:
         findings.append({"conf": "LOW",
@@ -3990,6 +4282,32 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
         return _decode_vex_instruction(b, idx, vex, crash_addr)
 
     opcode = b[idx]; idx += 1
+
+    if opcode == 0x0F and idx < len(b):
+        opcode2 = b[idx]; idx += 1
+        if opcode2 == 0x01 and idx < len(b):
+            modrm = b[idx]; idx += 1
+            reg = (modrm >> 3) & 0x7
+            PRIV_OPS = {0: "SGDT", 1: "SIDT", 2: "LGDT", 3: "LIDT", 4: "SMSW", 6: "LMSW", 7: "INVLPG"}
+            op_name = PRIV_OPS.get(reg, f"0F 01 /{reg}")
+            rm = modrm & 0x7
+            mod = (modrm >> 6) & 0x3
+            if mod == 3:
+                REG_NAMES = ["RAX","RCX","RDX","RBX","RSP","RBP","RSI","RDI"]
+                op_name += f" {REG_NAMES[rm]}"
+            return {"is_suicide": False,
+                    "instruction": f"{op_name} (privileged)",
+                    "explanation": f"{op_name} is a privileged CPU instruction that is illegal in user mode (ring 3). "
+                                   f"When executed by a user-mode process, it raises an ILLEGAL_INSTRUCTION exception. "
+                                   f"EasyAntiCheat deliberately executes this instruction to crash the process after "
+                                   f"detecting code tampering. If EAC is active, this is NOT a game bug.",
+                    "confidence": "HIGH"}
+        if opcode2 == 0x0B:
+            return {"is_suicide": True,
+                    "instruction": "UD2",
+                    "explanation": "UD2 (Undefined Instruction) - intentionally raises an illegal instruction exception. "
+                                   "Used by Stingray as a suicide mechanism.",
+                    "confidence": "HIGH"}
 
     if opcode == 0x89 and idx < len(b):
         modrm = b[idx]; idx += 1
@@ -6924,7 +7242,34 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
     elif ex_code == 0xC0000005 and not is_suicide:
         is_game_bug = True
 
-    if is_mod_confirmed:
+    is_eac_tamper = any("EAC anti-tamper" in f.get("title", "") for f in rootcause)
+    _signature_set = False
+
+    if is_eac_tamper:
+        verdict = "MOD"
+        color = V_MOD
+        title = "EAC anti-tamper detection (code modification)"
+        explanation = (
+            "EAC detected that game code was modified (overwritten with NOP instructions) "
+            "and deliberately crashed the process by executing a privileged instruction. "
+            "This is NOT a game bug. Something modified the game's code in memory - a mod, "
+            "trainer, cheat tool, or code injection hook. Remove all modifications and "
+            "verify game files through Steam."
+        )
+        confidence = "HIGH"
+        actions = [
+            {"label": "1. Remove mods and verify game files", "command": "open_mods_guide", "primary": True,
+             "description": "Remove all mods, trainers, and injection tools. Verify game files through Steam and retest."},
+            {"label": "2. Export report", "command": "export", "primary": False,
+             "description": "Generate a PDF to share with the dev team"},
+            {"label": "3. View evidence", "command": "goto_rootcause", "primary": False,
+             "description": "See the full EAC anti-tamper analysis"},
+        ]
+        sig_input = f"EAC_TAMPER|{ex_code_str}"
+        signature = "EAC-" + hashlib.md5(sig_input.encode()).hexdigest()[:8].upper()
+        _signature_set = True
+
+    elif is_mod_confirmed:
         verdict = "MOD"
         color = V_MOD
         high_inds = [i for i in mods.get("indicators", []) if i.get("severity") == "HIGH"]
@@ -7075,10 +7420,11 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
              "description": "Generate a PDF for the dev team"},
         ]
 
-    sig_input = f"{verdict}|{crash_module}|{crash_offset // 0x1000:04X}|{ex_code_str}"
-    signature = hashlib.md5(sig_input.encode()).hexdigest()[:8].upper()
-    sig_prefix = {"SUICIDE": "SUI", "GPU": "GPU", "MOD": "MOD", "GAME_BUG": "BUG", "INCONCLUSIVE": "UNK"}[verdict]
-    signature = f"{sig_prefix}-{signature}"
+    if not _signature_set:
+        sig_input = f"{verdict}|{crash_module}|{crash_offset // 0x1000:04X}|{ex_code_str}"
+        signature = hashlib.md5(sig_input.encode()).hexdigest()[:8].upper()
+        sig_prefix = {"SUICIDE": "SUI", "GPU": "GPU", "MOD": "MOD", "GAME_BUG": "BUG", "INCONCLUSIVE": "UNK"}[verdict]
+        signature = f"{sig_prefix}-{signature}"
 
     if is_mod_suspected and verdict != "MOD":
         suspected_notes = []
@@ -7459,7 +7805,7 @@ class ThreadGroupWidget(tk.Frame):
         self.configure(bg=BG)
         self._purpose = purpose
         self._color = color
-        self._expanded = False
+        self._expanded = True
         self._build()
 
     def _bind_click(self, widget):
@@ -7471,7 +7817,7 @@ class ThreadGroupWidget(tk.Frame):
         self._header = tk.Frame(self, bg=BG, cursor="hand2", pady=6)
         self._header.pack(fill="x")
 
-        self._arrow = tk.Label(self._header, text="▶", bg=BG, fg=self._color,
+        self._arrow = tk.Label(self._header, text="▼", bg=BG, fg=self._color,
                                font=(UI_FONT, 10, "bold"))
         self._arrow.pack(side="left")
 
@@ -7488,6 +7834,7 @@ class ThreadGroupWidget(tk.Frame):
         self._bind_click(self._header)
 
         self._container = tk.Frame(self, bg=BG)
+        self._container.pack(fill="x", padx=(16, 0), pady=(2, 4))
 
     def add_thread(self, thread_info: dict):
         row = tk.Frame(self._container, bg=BG2, padx=8, pady=4)
@@ -7890,6 +8237,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._tab_threads = tk.Frame(self._nb, bg=BG)
         self._tab_modules = tk.Frame(self._nb, bg=BG)
         self._tab_folder = tk.Frame(self._nb, bg=BG)
+        self._tab_memmap = tk.Frame(self._nb, bg=BG)
         self._tab_gpu = tk.Frame(self._nb, bg=BG)
 
         self._nb.add(self._tab_summary, text="  Summary  ")
@@ -7899,6 +8247,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._nb.add(self._tab_threads, text="  Threads  ")
         self._nb.add(self._tab_modules, text="  Modules & DLLs  ")
         self._nb.add(self._tab_folder, text="  Game Folder  ")
+        self._nb.add(self._tab_memmap, text="  Memory Map  ")
         self._nb.add(self._tab_gpu, text="  GPU Hang  ")
 
         self._build_summary_tab()
@@ -7908,6 +8257,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._build_threads_tab()
         self._build_modules_tab()
         self._build_folder_tab()
+        self._build_memmap_tab()
         self._build_gpu_tab()
 
         for i in range(self._nb.index('end')):
@@ -9023,6 +9373,506 @@ class CrashAnalyzerUI(_BaseWindow):
             bg=BG, fg=TEXT_DIM, font=(UI_FONT, 10))
         self._gpu_placeholder.pack(expand=True)
 
+    def _build_memmap_tab(self):
+        scrollable = ScrollableFrame(self._tab_memmap, bg=BG)
+        scrollable.pack(fill="both", expand=True)
+        self._memmap_inner = scrollable.inner
+
+    def _display_memmap(self, parsed: dict):
+        for w in self._memmap_inner.winfo_children():
+            w.destroy()
+
+        vad_list = parsed.get("vad_list") or []
+        misc = parsed.get("misc_info") or {}
+        smi = parsed.get("system_memory_info") or {}
+        ti = parsed.get("thread_info_list") or []
+        ft = parsed.get("function_tables") or []
+        tok = parsed.get("token_info") or {}
+
+        if not vad_list and not smi and not ti and not ft:
+            tk.Label(self._memmap_inner,
+                     text="No memory map data available in this dump.\n"
+                          "Game-generated dumps do not include MemoryInfoList.\n"
+                          "EAC-captured dumps include full VAD/page-protection data.",
+                     bg=BG, fg=TEXT_DIM, font=(UI_FONT, 10),
+                     justify="left").pack(pady=40)
+            return
+
+        if misc or smi:
+            tk.Label(self._memmap_inner, text="SYSTEM MEMORY", bg=BG, fg=ACCENT,
+                     font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(12, 4))
+
+            mem_frame = tk.Frame(self._memmap_inner, bg=BG2, padx=12, pady=8,
+                                 highlightbackground=BORDER, highlightthickness=1)
+            mem_frame.pack(fill="x", padx=20, pady=2)
+
+            if smi and smi.get("total_physical"):
+                tp = smi["total_physical"]
+                ap = smi.get("available_physical", 0)
+                tpf = smi.get("total_pagefile", 0)
+                apf = smi.get("available_pagefile", 0)
+                tv = smi.get("total_virtual", 0)
+                av = smi.get("available_virtual", 0)
+                rows = [
+                    ("Physical RAM",   f"{tp/1024/1024/1024:.1f} GB total, {ap/1024/1024/1024:.1f} GB free ({ap*100//tp if tp else 0}% free)"),
+                    ("Page file",      f"{tpf/1024/1024/1024:.1f} GB total, {apf/1024/1024/1024:.1f} GB free"),
+                    ("Virtual address",f"{tv/1024/1024/1024:.1f} GB total, {av/1024/1024/1024:.1f} GB free"),
+                ]
+            else:
+                rows = [("Memory info", "Not available in this dump")]
+
+            for label, value in rows:
+                row = tk.Frame(mem_frame, bg=BG2)
+                row.pack(fill="x", pady=1)
+                tk.Label(row, text=label, bg=BG2, fg=TEXT_DIM,
+                         font=(UI_FONT, 8), width=18, anchor="w").pack(side="left")
+                tk.Label(row, text=value, bg=BG2, fg=TEXT,
+                         font=(UI_MONO, 8), anchor="w").pack(side="left")
+
+            if misc.get("processor_max_mhz"):
+                row = tk.Frame(mem_frame, bg=BG2)
+                row.pack(fill="x", pady=1)
+                tk.Label(row, text="CPU clock", bg=BG2, fg=TEXT_DIM,
+                         font=(UI_FONT, 8), width=18, anchor="w").pack(side="left")
+                cur = misc.get("processor_current_mhz", 0)
+                mx = misc.get("processor_max_mhz", 0)
+                tk.Label(row, text=f"{cur} MHz current / {mx} MHz max", bg=BG2, fg=TEXT,
+                         font=(UI_MONO, 8), anchor="w").pack(side="left")
+
+            if tok.get("sid"):
+                row = tk.Frame(mem_frame, bg=BG2)
+                row.pack(fill="x", pady=1)
+                tk.Label(row, text="User SID", bg=BG2, fg=TEXT_DIM,
+                         font=(UI_FONT, 8), width=18, anchor="w").pack(side="left")
+                tk.Label(row, text=tok["sid"], bg=BG2, fg=TEXT,
+                         font=(UI_MONO, 8), anchor="w").pack(side="left")
+
+        if ti:
+            tk.Label(self._memmap_inner, text="THREAD START ADDRESSES", bg=BG, fg=ACCENT,
+                     font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(16, 4))
+            modules = parsed.get("modules", [])
+            resolved = 0
+            for t in ti:
+                sa = t.get("start_address", 0)
+                in_mod = any(int(m["base"], 16) <= sa < int(m["base"], 16) + m["size"]
+                             for m in modules)
+                if in_mod:
+                    resolved += 1
+            summary = tk.Frame(self._memmap_inner, bg=BG2, padx=12, pady=6,
+                               highlightbackground=BORDER, highlightthickness=1)
+            summary.pack(fill="x", padx=20, pady=2)
+            tk.Label(summary, text=f"{len(ti)} threads - {resolved} start in known modules, "
+                                   f"{len(ti)-resolved} unbacked (EAC hooks)",
+                     bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(anchor="w")
+
+        if ft:
+            tk.Label(self._memmap_inner, text="DYNAMIC FUNCTION TABLES", bg=BG, fg=ACCENT,
+                     font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(16, 4))
+            ft_frame = tk.Frame(self._memmap_inner, bg=BG2, padx=12, pady=8,
+                                highlightbackground=BORDER, highlightthickness=1)
+            ft_frame.pack(fill="x", padx=20, pady=2)
+            tk.Label(ft_frame, text=f"{len(ft)} dynamic function table(s) loaded (JIT/exception handlers)",
+                     bg=BG2, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(anchor="w")
+            for i, t in enumerate(ft[:5]):
+                tk.Label(ft_frame,
+                         text=f"  Table {i}: 0x{t['min_addr']:012X}-0x{t['max_addr']:012X} "
+                              f"({t['entry_count']} entries)",
+                         bg=BG2, fg=TEXT_DIM, font=(UI_MONO, 8)).pack(anchor="w")
+            if len(ft) > 5:
+                tk.Label(ft_frame, text=f"  ... and {len(ft)-5} more",
+                         bg=BG2, fg=TEXT_DIM, font=(UI_MONO, 8)).pack(anchor="w")
+
+        if vad_list:
+            modules = parsed.get("modules", [])
+            threads = parsed.get("threads", [])
+            mod_ranges = [(int(m["base"], 16), int(m["base"], 16) + m["size"],
+                           PureWindowsPath(m["name"]).name) for m in modules]
+            stack_map = {}
+            for t in threads:
+                rsp = t.get("rsp", 0)
+                if rsp:
+                    stack_map[t["tid"]] = rsp
+
+            crash_addr = 0
+            try:
+                crash_addr = int((parsed.get("exception") or {}).get("address", "0"), 16)
+            except Exception:
+                pass
+
+            def _find_mod(addr):
+                for base, end, name in mod_ranges:
+                    if base <= addr < end:
+                        return name
+                return None
+
+            def _categorize(vbase, vsize, vstate, vprot, vtype):
+                prot_byte = vprot & 0xFF
+                is_guard = bool(vprot & 0x100)
+                if vstate == 0x10000:
+                    return "free"
+                if vtype == 0x1000000:
+                    mod = _find_mod(vbase)
+                    if mod:
+                        return f"DLL: {mod}"
+                    return "IMAGE (unmapped)"
+                if vtype == 0x40000:
+                    return "MAPPED (file)"
+                if is_guard:
+                    return "Guard page"
+                if prot_byte in (0x10, 0x20, 0x40, 0x80):
+                    return "JIT / injected code"
+                if prot_byte in (0x02, 0x04):
+                    for tid, rsp in stack_map.items():
+                        if vbase <= rsp < vbase + vsize:
+                            return f"Stack: TID {tid}"
+                    if vsize >= 0x10000:
+                        return "Heap"
+                    return "TEB / PEB"
+                return "Private (other)"
+
+            cat_stats = {}
+            cat_regions = {}
+            for v in vad_list:
+                vbase, vsize, vstate, vprot, vtype = v
+                cat = _categorize(vbase, vsize, vstate, vprot, vtype)
+                if cat not in cat_stats:
+                    cat_stats[cat] = {"count": 0, "total_size": 0}
+                    cat_regions[cat] = []
+                cat_stats[cat]["count"] += 1
+                cat_stats[cat]["total_size"] += vsize
+                cat_regions[cat].append(v)
+
+            summary_toggle = tk.Frame(self._memmap_inner, bg=BG, cursor="hand2")
+            summary_toggle.pack(fill="x", padx=20, pady=(16, 0))
+            summary_arrow = tk.Label(summary_toggle, text="▼", bg=BG, fg=ACCENT,
+                                     font=(UI_FONT, 9, "bold"))
+            summary_arrow.pack(side="left")
+            tk.Label(summary_toggle,
+                     text=f" MEMORY MAP SUMMARY ({len(vad_list)} regions)",
+                     bg=BG, fg=ACCENT, font=(UI_FONT, 9, "bold")).pack(side="left")
+
+            summary_frame = tk.Frame(self._memmap_inner, bg=BG2, padx=12, pady=8,
+                                     highlightbackground=BORDER, highlightthickness=1)
+            summary_frame.pack(fill="x", padx=20, pady=2)
+
+            summary_expanded = [True]
+
+            def _toggle_summary(e=None):
+                summary_expanded[0] = not summary_expanded[0]
+                if summary_expanded[0]:
+                    summary_arrow.configure(text="▼")
+                    summary_frame.pack(fill="x", padx=20, pady=2)
+                else:
+                    summary_arrow.configure(text="▶")
+                    summary_frame.pack_forget()
+
+            summary_toggle.bind("<Button-1>", _toggle_summary)
+            for child in summary_toggle.winfo_children():
+                child.bind("<Button-1>", _toggle_summary)
+
+            hdr = tk.Frame(summary_frame, bg=BG2)
+            hdr.pack(fill="x", pady=(0, 4))
+            tk.Label(hdr, text="Category", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_MONO, 8, "bold"), width=30, anchor="w").pack(side="left")
+            tk.Label(hdr, text="Regions", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_MONO, 8, "bold"), width=8, anchor="e").pack(side="left")
+            tk.Label(hdr, text="Total Size", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_MONO, 8, "bold"), width=12, anchor="e").pack(side="left")
+
+            for cat in sorted(cat_stats.keys(), key=lambda c: -cat_stats[c]["total_size"]):
+                c = cat_stats[cat]
+                sz = c["total_size"]
+                if sz >= 1024 * 1024 * 1024:
+                    sz_s = f"{sz/1024/1024/1024:.1f} GB"
+                elif sz >= 1024 * 1024:
+                    sz_s = f"{sz/1024/1024:.0f} MB"
+                else:
+                    sz_s = f"{sz/1024:.0f} KB"
+                row = tk.Frame(summary_frame, bg=BG2)
+                row.pack(fill="x", pady=1)
+                if cat.startswith("DLL:"):
+                    cat_color = TEXT_DIM
+                elif "JIT" in cat:
+                    cat_color = ORANGE
+                elif "Stack" in cat:
+                    cat_color = GREEN
+                elif "Guard" in cat:
+                    cat_color = YELLOW
+                elif "Heap" in cat:
+                    cat_color = TEXT
+                elif "free" in cat:
+                    cat_color = TEXT_DIM
+                else:
+                    cat_color = TEXT_DIM
+                tk.Label(row, text=cat, bg=BG2, fg=cat_color,
+                         font=(UI_MONO, 8), width=30, anchor="w").pack(side="left")
+                tk.Label(row, text=str(c["count"]), bg=BG2, fg=TEXT_DIM,
+                         font=(UI_MONO, 8), width=8, anchor="e").pack(side="left")
+                tk.Label(row, text=sz_s, bg=BG2, fg=TEXT,
+                         font=(UI_MONO, 8), width=12, anchor="e").pack(side="left")
+
+            tk.Label(self._memmap_inner,
+                     text=f"DECIPHERED MEMORY REGIONS",
+                     bg=BG, fg=ACCENT, font=(UI_FONT, 9, "bold")).pack(anchor="w", padx=20, pady=(16, 4))
+
+            filter_frame = tk.Frame(self._memmap_inner, bg=BG, padx=20)
+            filter_frame.pack(fill="x", pady=(0, 4))
+
+            FILTERS = [
+                ("All",     None,       TEXT),
+                ("◄ Crash", "crash",    RED),
+                ("JIT",     "JIT",      ORANGE),
+                ("Stack",   "Stack",    GREEN),
+                ("Guard",   "Guard",    YELLOW),
+                ("DLL",     "DLL:",     TEXT_DIM),
+                ("Heap",    "Heap",     TEXT),
+                ("Mapped",  "MAPPED",   PURPLE),
+            ]
+
+            self._memmap_vad_list = vad_list
+            self._memmap_categorize = _categorize
+            self._memmap_crash_addr = crash_addr
+            self._memmap_filter = None
+
+            for label, fkey, color in FILTERS:
+                count = 0
+                for v in vad_list:
+                    vbase, vsize, vstate, vprot, vtype = v
+                    cat = _categorize(vbase, vsize, vstate, vprot, vtype)
+                    if vstate == 0x10000 and fkey != "crash":
+                        continue
+                    if fkey is None:
+                        count += 1
+                    elif fkey == "crash":
+                        if crash_addr and vbase <= crash_addr < vbase + vsize:
+                            count += 1
+                    elif fkey == "JIT" and "JIT" in cat:
+                        count += 1
+                    elif fkey == "Stack" and cat.startswith("Stack"):
+                        count += 1
+                    elif fkey == "Guard" and "Guard" in cat:
+                        count += 1
+                    elif fkey == "DLL:" and cat.startswith("DLL:"):
+                        count += 1
+                    elif fkey == "Heap" and cat == "Heap":
+                        count += 1
+                    elif fkey == "MAPPED" and cat == "MAPPED (file)":
+                        count += 1
+                chip = tk.Label(filter_frame,
+                                text=f" {label} ({count}) ",
+                                bg=BG2, fg=color,
+                                font=(UI_FONT, 8, "bold"),
+                                padx=8, pady=3,
+                                highlightbackground=color,
+                                highlightthickness=1,
+                                cursor="hand2")
+                chip.pack(side="left", padx=(0, 4))
+                chip.bind("<Button-1>", lambda e, k=fkey: self._apply_memmap_filter(k))
+
+            self._memmap_filter_frame = filter_frame
+
+            regions_header = tk.Frame(self._memmap_inner, bg=BG2, padx=8, pady=4)
+            regions_header.pack(fill="x", padx=20, pady=(8, 0))
+            tk.Label(regions_header, text="Base", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_MONO, 8, "bold"), width=14, anchor="w").pack(side="left")
+            tk.Label(regions_header, text="Size", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_MONO, 8, "bold"), width=9, anchor="w").pack(side="left")
+            tk.Label(regions_header, text="Protection", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_FONT, 8, "bold"), width=16, anchor="w").pack(side="left")
+            tk.Label(regions_header, text="Category", bg=BG2, fg=TEXT_DIM,
+                     font=(UI_FONT, 8, "bold"), width=30, anchor="w").pack(side="left")
+
+            self._memmap_regions_container = tk.Frame(self._memmap_inner, bg=BG)
+            self._memmap_regions_container.pack(fill="x")
+
+            self._memmap_footer_label = tk.Label(self._memmap_inner, text="",
+                     bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8))
+            self._memmap_footer_label.pack(anchor="w", padx=20, pady=4)
+
+            self._render_memmap_regions()
+
+        apply_font_scale(_FONT_SCALE, self._memmap_inner)
+
+
+    def _apply_memmap_filter(self, fkey):
+        self._memmap_filter = fkey
+        self._memmap_page = 0
+        self._collect_memmap_regions()
+        self._render_memmap_page()
+
+    def _collect_memmap_regions(self):
+        vad_list = getattr(self, "_memmap_vad_list", None)
+        if not vad_list:
+            self._memmap_filtered = []
+            return
+        _categorize = self._memmap_categorize
+        crash_addr = self._memmap_crash_addr
+        fkey = self._memmap_filter
+
+        filtered = []
+        for v in vad_list:
+            vbase, vsize, vstate, vprot, vtype = v
+            cat = _categorize(vbase, vsize, vstate, vprot, vtype)
+            is_crash = crash_addr and vbase <= crash_addr < vbase + vsize
+
+            if fkey is None:
+                if vstate == 0x10000 and not is_crash:
+                    continue
+                if not (is_crash or "JIT" in cat or "Guard" in cat or
+                        cat.startswith("Stack") or "IMAGE (unmapped)" in cat):
+                    continue
+            elif fkey == "crash":
+                if not is_crash:
+                    continue
+            elif fkey == "JIT":
+                if "JIT" not in cat:
+                    continue
+            elif fkey == "Stack":
+                if not cat.startswith("Stack"):
+                    continue
+            elif fkey == "Guard":
+                if "Guard" not in cat:
+                    continue
+            elif fkey == "DLL:":
+                if not cat.startswith("DLL:"):
+                    continue
+            elif fkey == "Heap":
+                if cat != "Heap":
+                    continue
+            elif fkey == "MAPPED":
+                if cat != "MAPPED (file)":
+                    continue
+
+            crash_regions = []
+            if is_crash:
+                crash_regions.append(v)
+                continue
+            filtered.append(v)
+
+        for v in crash_regions:
+            if v not in filtered:
+                filtered.insert(0, v)
+
+        self._memmap_filtered = filtered
+
+    def _render_memmap_page(self):
+        container = self._memmap_regions_container
+        self._memmap_nav_label = None
+        for child in container.winfo_children():
+            child.destroy()
+
+        filtered = getattr(self, "_memmap_filtered", [])
+        if not filtered:
+            self._memmap_footer_label.configure(text="\nNo regions match this filter.")
+            return
+
+        PAGE_SIZE = 50
+        page = getattr(self, "_memmap_page", 0)
+        total = len(filtered)
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        if page >= total_pages:
+            page = 0
+            self._memmap_page = 0
+        start = page * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total)
+        page_items = filtered[start:end]
+
+        _categorize = self._memmap_categorize
+        crash_addr = self._memmap_crash_addr
+
+        for v in page_items:
+            vbase, vsize, vstate, vprot, vtype = v
+            cat = _categorize(vbase, vsize, vstate, vprot, vtype)
+            is_crash = crash_addr and vbase <= crash_addr < vbase + vsize
+
+            bg_color = BG3 if is_crash else BG2
+            border_color = RED if is_crash else BORDER
+            if "JIT" in cat:
+                border_color = ORANGE
+            elif "Guard" in cat:
+                border_color = YELLOW
+            elif cat.startswith("Stack"):
+                border_color = GREEN
+
+            row = tk.Frame(container, bg=bg_color, padx=8, pady=2,
+                           highlightbackground=border_color,
+                           highlightthickness=1)
+            row.pack(fill="x", padx=20, pady=1)
+
+            prot_s = VAD_PROT_NAMES.get(vprot & 0xFF, f"0x{vprot:X}")
+            if vprot & 0x100:
+                prot_s += "+G"
+
+            if "JIT" in cat:
+                cat_color = ORANGE
+            elif cat.startswith("Stack"):
+                cat_color = GREEN
+            elif "Guard" in cat:
+                cat_color = YELLOW
+            elif cat.startswith("DLL:"):
+                cat_color = TEXT_DIM
+            elif "IMAGE" in cat:
+                cat_color = RED
+            elif "Heap" in cat:
+                cat_color = TEXT
+            else:
+                cat_color = TEXT_DIM
+
+            size_s = f"{vsize//1024}KB" if vsize < 1024*1024 else f"{vsize/1024/1024:.0f}MB"
+            tk.Label(row, text=f"0x{vbase:012X}", bg=bg_color, fg=TEXT,
+                     font=(UI_MONO, 8), width=14, anchor="w").pack(side="left")
+            tk.Label(row, text=size_s, bg=bg_color, fg=TEXT_DIM,
+                     font=(UI_MONO, 8), width=9, anchor="w").pack(side="left")
+            tk.Label(row, text=prot_s, bg=bg_color, fg=TEXT_DIM,
+                     font=(UI_FONT, 8), width=16, anchor="w").pack(side="left")
+            cat_label = cat
+            if is_crash:
+                cat_label = "◄ CRASH " + cat
+            tk.Label(row, text=cat_label, bg=bg_color, fg=cat_color,
+                     font=(UI_FONT, 8, "bold" if is_crash else "normal"),
+                     width=30, anchor="w").pack(side="left")
+
+        nav = tk.Frame(container, bg=BG)
+        nav.pack(fill="x", padx=20, pady=4)
+
+        if page > 0:
+            prev_btn = tk.Button(nav, text="◄ Prev",
+                                 command=lambda: self._memmap_goto_page(page - 1),
+                                 bg=BG3, fg=TEXT, relief="flat", padx=10, pady=2,
+                                 font=(UI_FONT, 8), cursor="hand2")
+            prev_btn.pack(side="left", padx=(0, 8))
+
+        if total_pages > 1:
+            self._memmap_nav_label = tk.Label(nav,
+                text=f"Page {page + 1} of {total_pages}  ({start+1}-{end} of {total})",
+                bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8))
+            self._memmap_nav_label.pack(side="left")
+
+        if page < total_pages - 1:
+            next_btn = tk.Button(nav, text="Next ►",
+                                 command=lambda: self._memmap_goto_page(page + 1),
+                                 bg=BG3, fg=TEXT, relief="flat", padx=10, pady=2,
+                                 font=(UI_FONT, 8), cursor="hand2")
+            next_btn.pack(side="right")
+
+        if total_pages > 1:
+            self._memmap_footer_label.configure(
+                text=f"\nShowing {start+1}-{end} of {total} matching regions.")
+        else:
+            self._memmap_footer_label.configure(
+                text=f"\nShowing all {total} matching regions.")
+
+        apply_font_scale(_FONT_SCALE, container)
+
+    def _memmap_goto_page(self, page):
+        self._memmap_page = page
+        self._render_memmap_page()
+
+    def _render_memmap_regions(self):
+        self._memmap_page = 0
+        self._collect_memmap_regions()
+        self._render_memmap_page()
+
 
     def _show_drop_zone(self):
         self._drop_zone.place(relx=0, rely=0, relwidth=1, relheight=1)
@@ -9175,6 +10025,7 @@ class CrashAnalyzerUI(_BaseWindow):
         self._display_threads(parsed)
         self._display_modules(parsed, mods, verdict_info)
         self._populate_folder_tree(parsed, mods)
+        self._display_memmap(parsed)
 
         ex_code = ex.get("code", "none")
         nmod = len(parsed.get("modules", []))
@@ -9490,7 +10341,7 @@ class CrashAnalyzerUI(_BaseWindow):
             PureWindowsPath(m["name"]).name.lower()
         ))
 
-        for m in sorted_mods[:100]:
+        for m in sorted_mods:
             name = PureWindowsPath(m["name"]).name
             is_crash = name.lower() == crash_mod
             bg_color = BG3 if is_crash else BG2
@@ -9511,10 +10362,6 @@ class CrashAnalyzerUI(_BaseWindow):
                      font=(UI_MONO, 8), width=12, anchor="w").pack(side="left")
             tk.Label(row, text=m["name"], bg=bg_color, fg=TEXT_DIM,
                      font=(UI_FONT, 7), anchor="w").pack(side="left")
-
-        if len(modules) > 100:
-            tk.Label(self._modules_inner, text=f"... and {len(modules)-100} more modules",
-                     bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(pady=8)
 
         tk.Label(self._modules_inner, text="DLL AUTHENTICITY VERIFICATION", bg=BG, fg=ACCENT,
                  font=(UI_FONT, 8, "bold")).pack(anchor="w", padx=20, pady=(20, 4))
@@ -11484,8 +12331,7 @@ class CrashAnalyzerUI(_BaseWindow):
         f9_bold = _rescale_font_spec((UI_FONT, 9, "bold"), _FONT_SCALE)
         menu = tk.Menu(self, tearoff=0, bg=BG2, fg=TEXT,
                        activebackground=BG3, activeforeground=TEXT,
-                       borderwidth=1, relief="solid",
-                       font=f9)
+                       borderwidth=1, relief="solid")
         pct = int(round(_FONT_SCALE * 100))
         menu.add_command(label="A+   Increase Font Size      Ctrl + =",
                          command=self._increase_font,
