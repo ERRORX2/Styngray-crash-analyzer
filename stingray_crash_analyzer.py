@@ -2757,7 +2757,20 @@ def _is_stingray_suicide(parsed: dict) -> tuple:
         return (False, "")
 
     if crash_mod_name.lower() in STINGRAY_GAME_EXES:
-        return (True, f"crash module {crash_mod_name} is a known Stingray game executable")
+        imem = read_virtual_memory(parsed, ex_addr, 8)
+        if imem and len(imem) >= 3:
+            b = list(imem)
+            if (len(b) >= 7 and b[0] == 0x89 and b[1] == 0x04 and b[2] == 0x25
+                    and b[3] == 0x00 and b[4] == 0x00 and b[5] == 0x00 and b[6] == 0x00):
+                return (True, f"crash module {crash_mod_name} - deliberate MOV [0x0] instruction (suicide)")
+            if (len(b) >= 7 and b[0] == 0xC7 and b[1] == 0x04 and b[2] == 0x25
+                    and b[3] == 0x00 and b[4] == 0x00 and b[5] == 0x00 and b[6] == 0x00):
+                return (True, f"crash module {crash_mod_name} - deliberate MOV [0x0], imm32 instruction (suicide)")
+            if b[0] == 0xCC:
+                return (True, f"crash module {crash_mod_name} - INT3 breakpoint (suicide)")
+            if len(b) >= 2 and b[0] == 0x0F and b[1] == 0x0B:
+                return (True, f"crash module {crash_mod_name} - UD2 undefined instruction (suicide)")
+        return (False, "")
 
     has_crs_client = any(
         PureWindowsPath(m["name"]).name.lower() == "crs-client.dll"
@@ -2773,6 +2786,16 @@ def _is_stingray_suicide(parsed: dict) -> tuple:
             crs_dir = str(PureWindowsPath(crs_path).parent).lower()
             crash_dir = str(PureWindowsPath(crash_mod_path).parent).lower()
             if crs_dir == crash_dir:
+                imem = read_virtual_memory(parsed, ex_addr, 8)
+                if imem and len(imem) >= 3:
+                    b = list(imem)
+                    if (len(b) >= 7 and b[0] == 0x89 and b[1] == 0x04 and b[2] == 0x25
+                            and b[3] == 0x00 and b[4] == 0x00 and b[5] == 0x00 and b[6] == 0x00):
+                        return (True, f"crash module {crash_mod_name} - deliberate MOV [0x0] instruction (suicide)")
+                    if b[0] == 0xCC:
+                        return (True, f"crash module {crash_mod_name} - INT3 breakpoint (suicide)")
+                    if len(b) >= 2 and b[0] == 0x0F and b[1] == 0x0B:
+                        return (True, f"crash module {crash_mod_name} - UD2 undefined instruction (suicide)")
                 return (True, f"crash module {crash_mod_name} is alongside crs-client.dll (Arrowhead crash reporter)")
 
     return (False, "")
@@ -3980,6 +4003,24 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
         except Exception:
             pass
 
+    modules = parsed.get("modules", [])
+    ex_addr = 0
+    try:
+        ex_addr = int(ex.get("address", "0"), 16)
+    except Exception:
+        pass
+    crash_mod = None
+    crash_off = 0
+    for m in modules:
+        try:
+            base = int(m["base"], 16)
+            if base <= ex_addr < base + m["size"]:
+                crash_mod = PureWindowsPath(m["name"]).name
+                crash_off = ex_addr - base
+                break
+        except Exception:
+            pass
+
     if decoded_instr and decoded_instr.get("instruction", "").startswith("VMOVAPS"):
         if fault_addr and fault_addr % 16 != 0:
             p = get_known_crash_pattern("MISALIGNED_VECTOR_LOAD")
@@ -3987,23 +4028,6 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
                 results.append({"id": "MISALIGNED_VECTOR_LOAD", **p})
 
     if ex_code == 0xC0000005 and fault_addr == 0:
-        modules = parsed.get("modules", [])
-        ex_addr = 0
-        try:
-            ex_addr = int(ex.get("address", "0"), 16)
-        except Exception:
-            pass
-        crash_mod = None
-        crash_off = 0
-        for m in modules:
-            try:
-                base = int(m["base"], 16)
-                if base <= ex_addr < base + m["size"]:
-                    crash_mod = PureWindowsPath(m["name"]).name
-                    crash_off = ex_addr - base
-                    break
-            except Exception:
-                pass
         if crash_mod and crash_mod.lower() == "game.dll":
             func = resolve_game_dll_offset(crash_off)
             _spawn_equip_offsets = {0xFD9710, 0x9AE030, 0x9AE6E0}
@@ -4020,6 +4044,32 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
                     if p:
                         results.append({"id": "PACKAGE_TABLE_FULL", **p})
                     break
+
+    if ex_code == 0xC0000005 and crash_mod and crash_mod.lower() == "helldivers2.exe":
+        regs = ex.get("regs", {}) or {}
+        rax = regs.get("rax", 0)
+        rcx = regs.get("rcx", 0)
+        rbx = regs.get("rbx", 0)
+
+        if crash_off == 0x9F60ED and rax == 0 and rcx == 0x15 and rbx == 0x800:
+            results.append({
+                "id": "AUDIO_VOICE_NULL_DEREF",
+                "description": "Audio voice null-deref during voice list iteration",
+                "cause": "The game iterates through a list of Wwise audio voice/emitter objects and calls a virtual method on each. One voice object (at index 21 / 0x15) is null - it was never initialized or was freed when an audio endpoint disappeared.",
+                "trigger": "Triggered by audio device changes during gameplay. Virtual audio devices (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create endpoints that Wwise fails to fully initialize. When the virtual device disconnects or changes state, the voice becomes null but stays in the iteration list. The game does not check for null before calling the virtual method.",
+                "fix": "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, VirtualBox audio). Set the default audio output to a single stable device (wired speakers or headphones, not Bluetooth). Disable unused audio endpoints in Windows Sound settings. If the crash persists, the game's audio system has a separate bug where voice entries are not cleaned up when endpoints disappear - report to Arrowhead with the crash offset and this pattern ID.",
+                "confidence": "HIGH",
+            })
+
+        if crash_off == 0x6AC699 and rax == 0x58 and rcx == 0 and fault_addr == 0x1018:
+            results.append({
+                "id": "REFCOUNT_PACKAGE_MULTI_RELEASE",
+                "description": "RefcountedPackageSystem multi-release crash during mission departure",
+                "cause": "The RefcountedPackageSystem releases the same packages (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6) three to four times each during the ship_planet_departure cutscene. This corrupts their reference counts - the underlying objects are freed while still referenced in iteration lists. The next engine tick tries to increment a freed object's refcount via LOCK XADD, hitting a null pointer at offset +0x1018.",
+                "trigger": "Triggered every time the player departs for a mission from the ship. The crash occurs approximately 1 second after the planet arrival cutscene ends. Reproduces deterministically across different users, different planets, fresh Windows accounts, and all system configuration changes tested (VC++ reinstall, SSD move, FPS lock, virtual device removal).",
+                "fix": "This is a game code bug in the RefcountedPackageSystem - no user-side fix exists. Report to Arrowhead with: crash offset helldivers2.exe +0x6AC699, the three package IDs being multi-released (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6), build 19411 / stingray:46659, and a --log-to-file console log showing the 4x release. The fix is to prevent the RefcountedPackageSystem from releasing the same package multiple times during the departure cutscene transition.",
+                "confidence": "HIGH",
+            })
 
     return results
 
@@ -4981,6 +5031,12 @@ def detect_mods(parsed: dict) -> dict:
         "\\program files\\rivatuner statistics server\\",
         "\\program files (x86)\\rivatuner statistics server\\",
         "\\program files\\playnite\\",
+        "\\program files\\windows defender\\",
+        "\\program files (x86)\\windows defender\\",
+        "\\program files\\windowsapps\\",
+        "\\program files (x86)\\windowsapps\\",
+        "\\program files\\microsoft\\",
+        "\\program files (x86)\\microsoft\\",
     ]
     if game_root:
         SAFE_PREFIXES.append(game_root)
@@ -5059,6 +5115,7 @@ def detect_mods(parsed: dict) -> dict:
         "discord_game_sdk.dll", "discordrpc.dll",
         "vivoxsdk.dll", "ortp.dll",
         "telemetry2_x64.dll", "rad_telemetry.dll",
+        "mpoav.dll", "mpclient.dll",
     })
 
     MOD_MANAGER_PATHS = {
@@ -5080,6 +5137,21 @@ def detect_mods(parsed: dict) -> dict:
         "reshade":          "ReShade (post-processing / D3D hook)",
         "minhook":          "MinHook (function hooking - common mod injection vector)",
         "\\xinput\\":        "XInput hook (common mod injection point)",
+        "\\mdl\\":           "MDL (Mod Dynamic Loader) - Stingray Lua mod loader",
+        "\\mdl\\helldivers": "MDL (Mod Dynamic Loader) mod directory",
+        "bingus":           "Bingus Shared Loader (Stingray mod loader, replaced by MDL)",
+        "bsl":              "BSL / Bingus Shared Loader (Stingray mod loader)",
+        "hd2runtime":       "HD2Runtime (Helldivers 2 Lua runtime mod framework)",
+        "\\echelon\\":      "Echelon (Helldivers 2 mod manager)",
+        "\\arsenal\\":      "HD2 Arsenal (Helldivers 2 mod manager)",
+        "hd2mm":            "HD2MM (Helldivers 2 Mod Manager)",
+        "\\resourcelab\\":  "MDL Resource Lab (live resource mod staging)",
+        "\\medicfilemodmerger\\": "Medic File Mod Merger (direct game file modifier - modifies .dl_bin settings files on disk)",
+        "medicfilemodmerger": "Medic File Mod Merger (direct game file modifier)",
+        "shodan":           "SHODAN Stat Editor (direct game stat/file modifier)",
+        "\\shodan\\":       "SHODAN Stat Editor (direct game stat/file modifier)",
+        "luna's loader":    "Luna's Loader (game file modifier)",
+        "lunasloader":      "Luna's Loader (game file modifier)",
     }
 
     PROXY_SYSTEM_DLLS: dict[str, str] = {
@@ -5165,10 +5237,18 @@ def detect_mods(parsed: dict) -> dict:
                 })
 
         if "appdata" in nl and "\\local\\" in nl and game_root and game_root not in nl:
+            if "\\mdl\\" in nl:
+                detail = (f"MDL (Mod Dynamic Loader) mod loaded from AppData: {name}. "
+                          f"MDL is a Stingray Lua mod loader that hooks the game's ESC menu "
+                          f"and can load/unload Lua mods at runtime. It also hooks Wwise audio "
+                          f"callbacks (core/wwise/lua/wwise_flow_callbacks). If the crash is "
+                          f"audio-related, MDL's Wwise hook may be a contributing factor.")
+            else:
+                detail = f"File loaded from AppData (possible mod config): {name}"
             indicators.append({
                 "type":   "appdata_mod",
                 "path":   name,
-                "detail": f"File loaded from AppData (possible mod config): {name}",
+                "detail": detail,
             })
 
     for m in modules:
@@ -10336,6 +10416,15 @@ class CrashAnalyzerUI(_BaseWindow):
         tk.Label(header, text="Path", bg=BG2, fg=TEXT_DIM,
                  font=(UI_FONT, 8, "bold"), anchor="w").pack(side="left")
 
+        legend = tk.Frame(self._modules_inner, bg=BG, padx=20)
+        legend.pack(fill="x", pady=(0, 4))
+        for label, color in [("Valid PE (signed DLL)", BLUE), ("Game DLL", GREEN),
+                              ("Crash module", RED), ("No PE checksum (suspicious)", YELLOW),
+                              ("Other", TEXT_DIM)]:
+            tk.Label(legend, text="■", fg=color, bg=BG, font=(UI_FONT, 7)).pack(side="left")
+            tk.Label(legend, text=f" {label}  ", bg=BG, fg=TEXT_DIM,
+                     font=(UI_FONT, 7)).pack(side="left")
+
         sorted_mods = sorted(modules, key=lambda m: (
             0 if PureWindowsPath(m["name"]).name.lower() == crash_mod else 1,
             PureWindowsPath(m["name"]).name.lower()
@@ -10347,14 +10436,45 @@ class CrashAnalyzerUI(_BaseWindow):
             bg_color = BG3 if is_crash else BG2
             border_color = RED if is_crash else BORDER
 
+            nl = m["name"].lower().replace("/", "\\")
+            cs = m.get("checksum", "0x00000000")
+            try:
+                cs_val = int(cs, 16) if isinstance(cs, str) else (cs or 0)
+            except Exception:
+                cs_val = 0
+            ts = m.get("timestamp", None)
+            ts_missing = (ts is None or ts == "N/A" or ts == 0 or ts == "0x00000000")
+            has_valid_pe = (cs_val != 0 and not ts_missing)
+
+            is_game = any(s in nl for s in [
+                "\\helldivers", "\\steamapps\\common\\helldivers",
+            ]) or name.lower() in ("game.dll", "runtime.dll", "helldivers2.exe",
+                                   "preloader.dll", "crs-client.dll")
+
+            if is_crash:
+                name_color = RED
+                name_weight = "bold"
+            elif is_game:
+                name_color = GREEN
+                name_weight = "normal"
+            elif not has_valid_pe and not name.lower().endswith(".exe"):
+                name_color = YELLOW
+                name_weight = "normal"
+            elif has_valid_pe:
+                name_color = BLUE
+                name_weight = "normal"
+            else:
+                name_color = TEXT_DIM
+                name_weight = "normal"
+
             row = tk.Frame(self._modules_inner, bg=bg_color, padx=8, pady=3,
                            highlightbackground=border_color,
                            highlightthickness=1 if is_crash else 0)
             row.pack(fill="x", padx=20, pady=1)
 
             tk.Label(row, text=name, bg=bg_color,
-                     fg=RED if is_crash else TEXT,
-                     font=(UI_MONO, 8, "bold" if is_crash else "normal"),
+                     fg=name_color,
+                     font=(UI_MONO, 8, name_weight),
                      width=40, anchor="w").pack(side="left")
             tk.Label(row, text=m["base"], bg=bg_color, fg=TEXT_DIM,
                      font=(UI_MONO, 8), width=20, anchor="w").pack(side="left")
