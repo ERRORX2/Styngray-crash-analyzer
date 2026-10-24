@@ -1,5 +1,5 @@
 {
-  "_comment": "Stingray Crash Analyzer - crash pattern library. Edit builtin_patterns to customize built-in patterns. Add new patterns to patterns[]. Note: LUA_MOD_DETECTED is generated dynamically by the code (tier-based confidence) and is not available for JSON override.",
+  "_comment": "Stingray Crash Analyzer - crash pattern library. SECTIONS: (1) builtin_patterns - overrides for the 60 code-level pattern messages by ID. Only 11 most-commonly-customized patterns are listed here; add others by ID to override. Set enabled:false to fall back to code default. (2) patterns - custom matchable patterns with match criteria. NOTE: SIG-HD2-SSR-01 and SIG-HD2-VTC-01 are handled by code-level CRASH_SIGNATURES (more precise match functions) and are NOT duplicated here to avoid redundant reporting. LUA_MOD_DETECTED is generated dynamically by the code and is not available for JSON override.",
   "_format": {
     "id": "Unique identifier - must match what the code expects for builtin patterns",
     "name": "Short crash name shown in the UI",
@@ -12,6 +12,24 @@
     "dev_note": "Technical note for developers",
     "confidence": "HIGH / MED / LOW",
     "enabled": "true to enable, false to disable"
+  },
+  "_match_fields_documentation": {
+    "ex_code": "Exception code as hex string (e.g. '0xC0000005')",
+    "ex_param_0": "Exception parameter[0] as hex string or int. For 0xC0000005: 0=READ, 1=WRITE, 8=EXECUTE",
+    "fault_addr_min": "Minimum faulting address (param[1]) as hex string or int",
+    "fault_addr_max": "Maximum faulting address (param[1]) as hex string or int. Set min=max for exact match",
+    "is_suicide": "true/false - whether the engine suicide pattern was detected",
+    "crash_mod_contains": "Substring to match in the crash module name (case-insensitive)",
+    "crash_offset": "Exact hex offset of the crash address within its module (e.g. '0x79A553')",
+    "stack_contains": "Substring to match in stack frame module names (case-insensitive)",
+    "stack_contains_depth": "Max stack depth to search for stack_contains (default 9999)",
+    "module_loaded": "Module name that must be loaded (case-insensitive substring match)",
+    "module_not_loaded": "Module name that must NOT be loaded (case-insensitive substring match)",
+    "active_thread_mod_contains": "Substring to match in active thread module names",
+    "lua_mod_present": "true/false - whether Lua mods are detected",
+    "null_register": "Register name (string) or list of register names that must be null at crash. e.g. 'R13' or ['RAX','RBP']",
+    "call_chain_offset": "Object {module, offset} - check if this offset appears in the reconstructed call chain",
+    "call_chain_offset_repeat": "Object {module, offset, min_count} - check if this offset appears min_count+ times in the call chain (recursion detection)"
   },
   "builtin_patterns": [
     {
@@ -76,7 +94,7 @@
       "fix": [
         "Check the .log file next to the .dmp for the real error",
         "Verify game files through Steam",
-        "Share the .log AND .dmp files with the 418th"
+        "Share the .log AND .dmp files with the dev team"
       ],
       "dev_note": "Generic engine suicide - check engine log for trigger",
       "confidence": "MED",
@@ -144,7 +162,7 @@
       "fix": [
         "Remove all mods and verify the crash still happens",
         "If the crash goes away without mods, the mod is the cause",
-        "If it still crashes without mods, please share the new dump with the 418th"
+        "If it still crashes without mods, please share the new dump with the dev team"
       ],
       "dev_note": "Mods detected - verify crash is reproducible in vanilla before investigation",
       "confidence": "MED",
@@ -156,7 +174,7 @@
       "player_message": "The game encountered an internal error it didn't know how to handle. This is a game bug. Check the engine log for the error message.",
       "fix": [
         "Check the .log file next to the .dmp for the error message",
-        "Share both the .log and .dmp with the 418th",
+        "Share both the .log and .dmp with the dev team",
         "Note what you were doing when it crashed"
       ],
       "dev_note": "Unhandled C++ exception - check exception type and message in log",
@@ -166,19 +184,78 @@
   ],
   "patterns": [
     {
-      "id": "EXAMPLE_PATTERN",
-      "name": "Example: my custom crash",
-      "player_message": "This is an example. Replace with your own crash description.",
+      "id": "SIG-HD2-GPV-01",
+      "name": "Helldivers 2 Guard page violation in EAC-injected code",
+      "player_message": "Code running in private executable memory (injected by EasyAntiCheat or JIT-compiled) tried to read from a system DLL that was protected by a guard page. This is an EAC-domain crash: the game's own code was not at fault. The root cause is unclear without the engine log.",
       "fix": [
-        "Step one for the player",
-        "Step two for the player"
+        "Verify game files in Steam (this covers EAC files).",
+        "If the crash recurs, try reinstalling EAC separately (run the EAC installer in the game's binaries folder).",
+        "Report to Arrowhead with the dump and engine log (--log-to-file). Include: 0x80000001 guard page violation, RIP in private exec memory, accessed address in D3D12.dll."
       ],
-      "dev_note": "Notes for the dev team about root cause",
+      "dev_note": "SIG-HD2-GPV-01 (open): 0x80000001 STATUS_GUARD_PAGE_VIOLATION. RIP in PRIVATE EXECUTABLE memory (not any loaded module). READ access to an address inside a system DLL (typically D3D12.dll). EAC-captured dump. Multiple null/near-null registers. Stack smashed. This is an EAC-domain crash: could be EAC hook code faulting on a guard page, or tamper detection triggering.",
       "confidence": "MED",
       "match": {
+        "ex_code": "0x80000001",
+        "ex_param_0": "0x0"
+      },
+      "enabled": true
+    },
+    {
+      "id": "SIG-HD2-PEHDR-01",
+      "name": "Helldivers 2 Execute PE header (corrupted function pointer to module base)",
+      "player_message": "A corrupted function pointer pointed at the very start of a DLL (the PE file header, which is data, not code), and the CPU tried to execute it. This is an engine bug: a vtable or indirect call target got overwritten with a module's base address.",
+      "fix": [
+        "This is an engine bug: no user-side fix is confirmed.",
+        "Capture the engine log (--log-to-file) and report to Arrowhead with the dump.",
+        "Include: EXECUTE-violation at a module's base address (+0x0), RBP=0, build identifier."
+      ],
+      "dev_note": "SIG-HD2-PEHDR-01 (open): 0xC0000005 EXECUTE at a loaded module's base address (offset +0x0 = PE header). The CPU was redirected to the MZ/PE header bytes and tried to execute them. RBP=0 (null frame pointer: stack frame corrupted). Recursion between runtime.dll and EOSSDK-Win64-Shipping.dll may be involved. Build: 42899.41204.",
+      "confidence": "HIGH",
+      "match": {
         "ex_code": "0xC0000005",
-        "is_suicide": true,
-        "active_thread_mod_contains": "lua"
+        "ex_param_0": "0x8",
+        "crash_offset": "0x0",
+        "null_register": "RBP"
+      },
+      "enabled": true
+    },
+    {
+      "id": "SIG-HD2-NPD-01",
+      "name": "Helldivers 2 Null pointer dereference at struct field offset",
+      "player_message": "The game tried to access a field of an object that was null (destroyed, never initialized, or returned null by a function that wasn't checked). This is a game bug: the code didn't validate the object before using it.",
+      "fix": [
+        "This is a game bug: report it with the dump file.",
+        "Note what you were doing when it crashed (loading a mission, opening a menu, joining a squad, etc.).",
+        "Capture the engine log (--log-to-file) for more context on what the engine was doing."
+      ],
+      "dev_note": "SIG-HD2-NPD-01 (open): 0xC0000005 READ at a near-null address (typically 0x58 = field offset +88). The null object pointer was in RAX. The faulting instruction did [RAX+offset]. This is the most common crash type in C++ engines: a null 'this' pointer or unchecked function return. Build: 42899.41204.",
+      "confidence": "HIGH",
+      "match": {
+        "ex_code": "0xC0000005",
+        "ex_param_0": "0x0",
+        "fault_addr_min": "0x0",
+        "fault_addr_max": "0x1000",
+        "crash_mod_contains": "helldivers2.exe",
+        "null_register": "RAX"
+      },
+      "enabled": true
+    },
+    {
+      "id": "SIG-HD2-UAF-01",
+      "name": "Helldivers 2 Use-after-free with deep recursion",
+      "player_message": "The game entered a deep recursion (15+ re-entries of the same function), which culminated in a use-after-free: a pointer to freed memory was dereferenced. This is a game bug involving both unbounded recursion and a stale pointer.",
+      "fix": [
+        "This is a game bug: report it with the dump file.",
+        "Note what you were doing when it crashed.",
+        "Capture the engine log (--log-to-file).",
+        "Include in the report: the recursion hub offset and the UAF faulting address."
+      ],
+      "dev_note": "SIG-HD2-UAF-01 (open): 0xC0000005 READ at a heap address (valid-looking pointer to freed memory). Deep recursion (x15-18 re-entries) in helldivers2.exe precedes the crash. The recursion may cause stack pressure leading to premature object cleanup, which then causes the UAF. Build: 42899.41204. Recursion hub offset varies by code path.",
+      "confidence": "HIGH",
+      "match": {
+        "ex_code": "0xC0000005",
+        "ex_param_0": "0x0",
+        "crash_mod_contains": "helldivers2.exe"
       },
       "enabled": false
     },
@@ -200,5 +277,103 @@
       },
       "enabled": true
     }
-  ]
+  ],
+  "_code_signatures": {
+    "_comment": "These signatures are matched in code via match_signatures() and reported in the CRASH SIGNATURE MATCH section. They are NOT in patterns[] to avoid duplicate reporting. They use more complex match functions than JSON patterns support.",
+    "signatures": [
+      {
+        "id": "SIG-HD2-SSR-01",
+        "title": "Helldivers 2 Stingray Setup Recursion (build 19411)",
+        "status": "resolved",
+        "fix": "Clean reinstall of the game.",
+        "match_criteria": "0xC0000005 READ at 0xFFFFFFFFFFFFFFFF, helldivers2.exe+0x79A553, recursion at +0x17001D0 (x3+)"
+      },
+      {
+        "id": "SIG-HD2-VTC-01",
+        "title": "Helldivers 2 vtable corruption to KUSER_SHARED_DATA execute-violation",
+        "status": "open",
+        "fix": "No confirmed fix. Report to Arrowhead with dump + engine log.",
+        "match_criteria": "0xC0000005 EXECUTE at 0x7FFE0000-0x7FFE1000, R13=0, stack smashed (<=4 frames)"
+      }
+    ]
+  },
+  "_builtin_pattern_registry": {
+    "_comment": "All 60 builtin pattern IDs in the code. Add any of these to builtin_patterns[] to override their messages. Only 11 are listed by default (the most commonly customized).",
+    "all_ids": [
+      "LUA_MOD_DETECTED",
+      "RESHADE_DIRECT_CRASH",
+      "RESHADE_D3D_CORRUPTION",
+      "PROXY_DLL_CRASH",
+      "MOD_CRASH",
+      "DUAL_GPU_DRIVER_CRASH",
+      "GPU_DRIVER_CRASH",
+      "DXGI_DEVICE_LOST",
+      "STACK_OVERFLOW",
+      "HEAP_CORRUPTION",
+      "CPP_EXCEPTION",
+      "ILLEGAL_INSTR",
+      "DLL_NOT_FOUND",
+      "DLL_INIT_FAILED",
+      "IN_PAGE_ERROR",
+      "PURE_VIRTUAL_CALL",
+      "NULL_DEREF_READ",
+      "NEAR_NULL_READ",
+      "NULL_DEREF_WRITE",
+      "INT_DIVIDE_BY_ZERO",
+      "FLOAT_DIVIDE_BY_ZERO",
+      "FLOAT_INVALID",
+      "INT_OVERFLOW",
+      "PRIVILEGED_INSTR",
+      "ARRAY_BOUNDS",
+      "INVALID_HANDLE",
+      "INVALID_CRT_PARAM",
+      "ACCESS_DENIED",
+      "OUT_OF_MEMORY",
+      "NOT_MAPPED",
+      "ASSERTION_FAILURE",
+      "STACK_BUFFER_OVERRUN",
+      "GUARD_PAGE",
+      "MISALIGNMENT",
+      "ENTRY_POINT_NOT_FOUND",
+      "NTDLL_HEAP_FAULT",
+      "ANTICHEAT_CRASH",
+      "BINK_VIDEO_CRASH",
+      "STEAM_API_CRASH",
+      "GAMEGUARD_CRASH",
+      "WWISE_CRASH",
+      "FMOD_CRASH",
+      "PHYSX_CRASH",
+      "LUA_CRASH",
+      "DSTORAGE_CRASH",
+      "POSSIBLE_USE_AFTER_FREE",
+      "CRASH_HANDLER_FAULT",
+      "SUICIDE_DSTORAGE",
+      "SUICIDE_LUA",
+      "SUICIDE_AUDIO",
+      "SUICIDE_GPU",
+      "SUICIDE_NETWORK",
+      "SUICIDE_PHYSICS",
+      "SUICIDE_SAVEGAME",
+      "SUICIDE_LEVEL_STREAMING",
+      "SUICIDE_ANIMATION",
+      "SUICIDE_UI",
+      "SUICIDE_ENTITY",
+      "SUICIDE_RESOURCE",
+      "SUICIDE_SHADER",
+      "SUICIDE_GENERIC"
+    ],
+    "currently_overridden": [
+      "SUICIDE_DSTORAGE",
+      "SUICIDE_LUA",
+      "SUICIDE_AUDIO",
+      "SUICIDE_GPU",
+      "SUICIDE_GENERIC",
+      "GPU_DRIVER_CRASH",
+      "DXGI_DEVICE_LOST",
+      "STACK_OVERFLOW",
+      "HEAP_CORRUPTION",
+      "MOD_CRASH",
+      "CPP_EXCEPTION"
+    ]
+  }
 }

@@ -231,6 +231,104 @@ LUA_PATCH_OFFSET = 0x50
 LUA_PATCH_FILENAME_RE = re.compile(r'\.patch_', re.IGNORECASE)
 
 
+STINGRAY_ARCHIVE_MAGIC = 0xF0000011
+STINGRAY_ARCHIVE_HEADER_SIZE = 72
+STINGRAY_ARCHIVE_TYPE_ENTRY_SIZE = 32
+STINGRAY_ARCHIVE_ENTRY_SIZE = 80
+STINGRAY_ARCHIVE_ENTRY_KEY_OFFSET = 0       # bytes 0-7: resource key
+STINGRAY_ARCHIVE_ENTRY_TYPE_OFFSET = 8      # bytes 8-15: type ID hash
+STINGRAY_ARCHIVE_ENTRY_DATA_OFFSET = 16     # bytes 16-23: u64 data offset
+STINGRAY_ARCHIVE_ENTRY_LENGTH_OFFSET = 56   # bytes 56-59: u32 data length
+STINGRAY_LUA_SOURCE_TYPE = 2                # envelope type field = 2 for plain-text Lua
+
+LUA_BYTECODE_SIG = b'\x1bLua'    # PUC-Rio Lua 5.1 compiled chunk
+LUAJIT_BYTECODE_SIG = b'\x1bLJ'  # LuaJIT compiled chunk
+
+ENGINE_LIFECYCLE_HOOKS = {"init", "update", "render", "shutdown"}
+
+STINGRAY_BOOT_RESOURCE_ID = 0xF476DF93691895FA  # hash of "boot"
+STINGRAY_BOOT_BUNDLE_HASH = "9ba626afa44a3aa3"   # bundle containing the boot resource
+
+STINGRAY_MURMUR64A_SEED = 0
+STINGRAY_MURMUR64A_MIX = 0xC6A4A7935BD1E995
+
+KNOWN_GAME_BUILDS = [
+    {
+        "build_id": "25988413 / 26088801",
+        "description": "Helldivers 2 October 2026 build (Lua 5.1, no LuaJIT)",
+        "exe_sha256": "0ACC07DEBE04714AE04281E1A66BD2EB9D3D85232953E32A93C8A3DD0874EABE",
+        "game_sha256": "6D1D4D3BC6FC84801D9F8F1B310E13A603D07409F3D9495D74B42E1D0BB1C08F",
+        "engine_version": "stingray:46659",
+        "lua_runtime": "PUC-Rio Lua 5.1.4 (statically linked, no lua51.dll)",
+        "notes": "Removed lua51.dll (LuaJIT) in favor of statically linked PUC-Rio Lua 5.1.4. "
+                 "Removed core/wwise/lua/wwise_flow_callbacks.",
+    },
+]
+
+
+def stingray_murmur64a(data: bytes) -> int:
+
+    length = len(data)
+    m = STINGRAY_MURMUR64A_MIX
+    r = 47
+
+    h = (length * m) & 0xFFFFFFFFFFFFFFFF
+
+    for i in range(0, length & ~7, 8):
+        k = int.from_bytes(data[i:i+8], 'little')
+        k = (k * m) & 0xFFFFFFFFFFFFFFFF
+        k ^= (k >> r)
+        k = (k * m) & 0xFFFFFFFFFFFFFFFF
+        h ^= k
+        h = (h * m) & 0xFFFFFFFFFFFFFFFF
+
+    remaining = length & 7
+    if remaining > 0:
+        tail = data[length & ~7:length]
+        tail = tail + b'\x00' * (8 - remaining)
+        k = int.from_bytes(tail, 'little')
+        h ^= k
+        h = (h * m) & 0xFFFFFFFFFFFFFFFF
+
+    h ^= h >> r
+    h = (h * m) & 0xFFFFFFFFFFFFFFFF
+    h ^= h >> r
+
+    return h
+
+
+_KNOWN_RESOURCE_NAMES = [
+    "lua", "shader", "texture", "unit", "material", "sound", "animation",
+    "level", "package", "font", "config", "boot", "render_config",
+    "physics_config", "navmesh", "flow", "wwise_flow_callbacks",
+    "actor", "mover", "camera", "light", "particle", "decal",
+    "terrain", "vegetation", "mesh", "skeleton", "state_machine",
+    "input_filter", "shader_template", "global_shader_indices",
+]
+
+STINGRAY_RESOURCE_ID_LOOKUP: dict = {}
+for _name in _KNOWN_RESOURCE_NAMES:
+    _hid = stingray_murmur64a(_name.encode('utf-8'))
+    STINGRAY_RESOURCE_ID_LOOKUP[_hid] = _name
+
+_lua_hash = stingray_murmur64a(b'lua')
+assert _lua_hash == int.from_bytes(LUA_TYPE_ID_SIGNATURE, 'little'), (
+    f"MurmurHash64A('lua') = 0x{_lua_hash:016X} but expected {LUA_TYPE_ID_SIGNATURE.hex()}"
+)
+
+
+HD2_ADDON_DECLARATION_RE = re.compile(
+    rb'-- HD2-Addon: (mods/[A-Za-z0-9_]+/[A-Za-z0-9_/]+)',
+    re.MULTILINE
+)
+
+
+
+def lookup_resource_id(resource_id: int) -> "str | None":
+
+    return STINGRAY_RESOURCE_ID_LOOKUP.get(resource_id)
+
+
 DXGI_REMOVAL_REASONS = {
     "0x887A0005": ("DXGI_ERROR_DEVICE_REMOVED",
                    "The GPU device was physically removed or powered off, or a driver upgrade "
@@ -1023,7 +1121,6 @@ DISCORD_KNOWN_GOOD: list[dict] = [
 ]
 
 
-
 VCRUNTIME140_KNOWN_GOOD: list[dict] = [
     {"version": "14.38.x (VS2022 17.8)",  "size_min":  80_000, "size_max": 115_000,
      "notes": "VS2022 17.8 redistributable"},
@@ -1419,7 +1516,6 @@ def verify_critical_dlls(parsed: dict) -> dict:
                         )
             except Exception:
                 pass
-
 
 
         critical_keywords = (
@@ -1981,7 +2077,6 @@ def analyse_threads(parsed: dict) -> list:
 
     result.sort(key=sort_key)
     return result
-
 
 
 def _detect_recursion(parsed: dict) -> str:
@@ -2720,7 +2815,6 @@ def _null_registers_at_crash(parsed: dict) -> dict:
     }
 
 
-
 STINGRAY_GAME_EXES = {
     "helldivers2.exe",
 }
@@ -2786,16 +2880,6 @@ def _is_stingray_suicide(parsed: dict) -> tuple:
             crs_dir = str(PureWindowsPath(crs_path).parent).lower()
             crash_dir = str(PureWindowsPath(crash_mod_path).parent).lower()
             if crs_dir == crash_dir:
-                imem = read_virtual_memory(parsed, ex_addr, 8)
-                if imem and len(imem) >= 3:
-                    b = list(imem)
-                    if (len(b) >= 7 and b[0] == 0x89 and b[1] == 0x04 and b[2] == 0x25
-                            and b[3] == 0x00 and b[4] == 0x00 and b[5] == 0x00 and b[6] == 0x00):
-                        return (True, f"crash module {crash_mod_name} - deliberate MOV [0x0] instruction (suicide)")
-                    if b[0] == 0xCC:
-                        return (True, f"crash module {crash_mod_name} - INT3 breakpoint (suicide)")
-                    if len(b) >= 2 and b[0] == 0x0F and b[1] == 0x0B:
-                        return (True, f"crash module {crash_mod_name} - UD2 undefined instruction (suicide)")
                 return (True, f"crash module {crash_mod_name} is alongside crs-client.dll (Arrowhead crash reporter)")
 
     return (False, "")
@@ -2818,7 +2902,6 @@ def _identify_bad_register(decoded_instr: dict, null_regs: dict, fault_addr: int
         if re.search(r'\b' + reg + r'\b', operand):
             return reg
     return None
-
 
 
 def _read_mem(raw: bytes, memory_map: list, addr: int, size: int) -> "bytes | None":
@@ -2907,7 +2990,7 @@ def _is_valid_return_address(addr: int, mod_base: int, pdata: "list | None") -> 
     return False
 
 
-def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
+def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
     ex        = parsed.get("exception", {}) or {}
     ex_regs   = ex.get("regs", {})
     crash_rip = int(ex.get("address", "0"), 16) if ex else 0
@@ -3015,7 +3098,7 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 16) -> list:
 
     if not chain:
         scanned = fallback_stack_scan(parsed)
-        for i, val, sn, off, label in scanned[:16]:
+        for i, val, sn, off, label in scanned[:200]:
             chain.append((val, sn, off, False))
         if chain:
             parsed["_stack_unwind"]["fallback_scan"] = len(chain)
@@ -3571,7 +3654,7 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             "link": None,
         })
 
-    chain = _reconstruct_call_chain(parsed, max_frames=12)
+    chain = _reconstruct_call_chain(parsed)
     if chain:
         unwind_info = parsed.get("_stack_unwind", {})
         extended    = parsed.get("_stack_chain_extended", [])
@@ -3590,11 +3673,24 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             conf = "LOW"
 
         chain_lines = []
+        from collections import Counter as _Counter
+        _repeat_counts = _Counter((m, o) for _, m, o in chain)
+        _seen_so_far: dict = {}
         for i, (addr, mod, off) in enumerate(chain):
             prefix   = "CRASH → " if i == 0 else f"  ← #{i:02d}  "
             verified = extended[i][3] if i < len(extended) else False
             vtag     = "" if i == 0 else (" [pdata✓]" if verified else " [heuristic]")
-            chain_lines.append(f"{prefix}0x{addr:016X}  {mod} +0x{off:X}{vtag}")
+            rtag = ""
+            key = (mod, off)
+            total = _repeat_counts.get(key, 1)
+            if total > 1:
+                _seen_so_far[key] = _seen_so_far.get(key, 0) + 1
+                occ = _seen_so_far[key]
+                if occ == 1:
+                    rtag = f" [repeat ×{total}]"
+                else:
+                    rtag = f" [repeat ×{total} #{occ}]"
+            chain_lines.append(f"{prefix}0x{addr:016X}  {mod} +0x{off:X}{vtag}{rtag}")
 
         findings.append({"conf": conf,
             "title": f"Crash thread call chain ({len(chain)} engine frames - {quality})",
@@ -3713,9 +3809,483 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
 
     return findings
 
+
+CRASH_SIGNATURES: list = []
+
+def _register_signature(sig_id: str, title: str, status: str, fix: str, match_fn) -> None:
+    CRASH_SIGNATURES.append({
+        "id": sig_id, "title": title, "status": status, "fix": fix, "match": match_fn,
+    })
+
+def _sig_chain_offsets(call_chain: list, mod_name: str) -> set:
+    offsets = set()
+    for fr in call_chain:
+        if isinstance(fr, (tuple, list)) and len(fr) >= 3:
+            addr, mod, off = fr[0], fr[1], fr[2]
+            if mod == mod_name:
+                try:
+                    offsets.add(int(off))
+                except (ValueError, TypeError):
+                    pass
+    return offsets
+
+def _sig_sentinel_count(call_chain: list, sentinel: int = 0xFFFFFFFF) -> int:
+    count = 0
+    for fr in call_chain:
+        if isinstance(fr, (tuple, list)) and len(fr) >= 1:
+            try:
+                if int(fr[0]) == sentinel:
+                    count += 1
+            except (ValueError, TypeError):
+                pass
+    return count
+
+def _sig_fault_mod_and_offset(parsed: dict):
+    ex = parsed.get("exception")
+    if not ex:
+        return None, None
+    try:
+        fa = int(ex.get("address", "0"), 16)
+    except (ValueError, TypeError):
+        return None, None
+    for m in parsed.get("modules", []):
+        try:
+            base = int(m["base"], 16)
+            if base <= fa < base + m["size"]:
+                return PureWindowsPath(m["name"]).name, fa - base
+        except (ValueError, TypeError, KeyError):
+            continue
+    return None, None
+
+
+def _match_sig_hd2_ssr_01(parsed: dict):
+    """SIG-HD2-SSR-01: Helldivers 2 Stingray Setup Recursion (build 19411).
+
+    Root cause: unbounded recursion through the +0x170xxxx code region of
+    helldivers2.exe. The recursion overflows the call stack, smashing return
+    addresses to 0xFFFFFFFF sentinels. The engine then dereferences a
+    corrupted pointer (the exact value depends on which stack slot got hit
+    first; varies by machine, ASLR, and call depth) and faults with
+    0xC0000005.
+
+    Confirmed on multiple machines with different crash offsets, faulting
+    addresses, and specific recursion hubs within the +0x170xxxx region:
+    - DESKTOP-9RQIU4F: recursion at +0x17001D0 (x7), crash at +0x79A553
+    - Nukichu: recursion at +0x1735468 (x6), +0x172E258 (x5), +0x172B048 (x5),
+      crash at +0x13890E5
+    All share the same +0x170xxxx recursion region and 0xFFFFFFFF stack-smash
+    sentinel pattern.
+
+    Fix: clean reinstall of the game. The recursion is triggered by corrupted
+    package/install data; a clean reinstall replaces the malformed data and
+    the recursion stops.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) != 0x0:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
+    if fault_mod != "helldivers2.exe":
+        return False, []
+    try:
+        chain = _reconstruct_call_chain(parsed)
+    except Exception:
+        chain = []
+    from collections import Counter as _Counter
+    region_counts = _Counter()
+    for _, m, o in chain:
+        if m == "helldivers2.exe" and 0x1700000 <= o < 0x1800000:
+            region_counts[o] += 1
+    repeating_in_region = {off: cnt for off, cnt in region_counts.items() if cnt >= 2}
+    total_region_repeats = sum(repeating_in_region.values())
+    if total_region_repeats < 3:
+        return False, []
+    sentinel_count = _sig_sentinel_count(chain)
+    if sentinel_count < 3:
+        return False, []
+    fault_addr = params[1] if len(params) >= 2 else "?"
+    hub_desc = ", ".join("+0x%X x%d" % (off, cnt)
+                         for off, cnt in sorted(repeating_in_region.items()))
+    evidence = [
+        "exception 0xC0000005 (READ)",
+        "faulting module helldivers2.exe +0x%X (varies by machine)" % fault_off,
+        "faulting address 0x%s (corrupted pointer; exact value varies by machine)" % fault_addr,
+        "recursion in +0x170xxxx region: %s (root cause)" % hub_desc,
+        "total repeating frames in region: %d" % total_region_repeats,
+        "stack-smash sentinels (0xFFFFFFFF): %d (confirms stack overflow)" % sentinel_count,
+        "root cause: unbounded recursion through helldivers2.exe +0x170xxxx code region",
+        "fix: clean reinstall of the game (confirmed on DESKTOP-9RQIU4F)",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-SSR-01",
+    "Helldivers 2 Stingray Setup Recursion (build 19411)",
+    "resolved",
+    "Clean reinstall of the game. Steam 'Verify Integrity' may be insufficient; "
+    "a full wipe-and-reinstall was required in the confirmed case. Disk health "
+    "check on the install drive is recommended as follow-up. "
+    "The exact crash offset and faulting address vary by machine; the "
+    "root cause is the recursion through helldivers2.exe +0x170xxxx code region, not the "
+    "specific crash site.",
+    _match_sig_hd2_ssr_01,
+)
+
+
+def _match_sig_hd2_vtc_01(parsed: dict):
+    """SIG-HD2-VTC-01: Helldivers 2 vtable corruption -> KUSER_SHARED_DATA execute.
+
+    Root cause: corrupted function pointer / vtable slot redirected the CPU into
+    the KUSER_SHARED_DATA page (0x7FFE0000), which is non-executable. Likely a
+    use-after-free on a callable object. R13=0 at crash (null 'this').
+    Fix: none confirmed. Report to Arrowhead with dump + engine log.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) != 0x8:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    try:
+        fa = int(params[1], 16)
+        if not (0x7FFE0000 <= fa < 0x7FFE1000):
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    regs = ex.get("regs", {})
+    if regs.get("r13") != 0:
+        return False, []
+    try:
+        chain = _reconstruct_call_chain(parsed)
+        if len(chain) > 4:
+            return False, []
+    except Exception:
+        return False, []
+    evidence = [
+        "exception 0xC0000005 (EXECUTE)",
+        "faulting address 0x%X in KUSER_SHARED_DATA" % int(params[1], 16),
+        "R13 = 0 at crash (null 'this' pointer)",
+        "stack smashed (%d recoverable frame(s))" % len(chain),
+        "corrupted function pointer / vtable slot (use-after-free suspected)",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-VTC-01",
+    "Helldivers 2 vtable corruption to KUSER_SHARED_DATA execute-violation",
+    "open",
+    "No confirmed fix. Likely a use-after-free on a callable object; the vtable "
+    "slot got overwritten with a KUSER_SHARED_DATA-adjacent address. Report to "
+    "Arrowhead with dump + build identifier. Engine log (--log-to-file) needed to "
+    "identify what the engine was doing when the corruption occurred.",
+    _match_sig_hd2_vtc_01,
+)
+
+
+def match_signatures(parsed: dict) -> list:
+    matched = []
+    for sig in CRASH_SIGNATURES:
+        try:
+            is_match, evidence = sig["match"](parsed)
+            if is_match:
+                matched.append({
+                    "id": sig["id"],
+                    "title": sig["title"],
+                    "status": sig["status"],
+                    "fix": sig["fix"],
+                    "evidence": evidence,
+                })
+        except Exception:
+            pass
+    return matched
+
+
+
+import base64 as _b64
+
+def _dec(s):
+    return _b64.b64decode(s).decode('utf-8')
+
+_KNOWN_LDR_PATHS = [
+    "bW9kcy9jb3dib3liaW5ndXMvdmFuaWxsYV9wbHVzX21lZ2FwYWNr",
+    "bW9kcy9jb3dib3liaW5ndXMvYmV0dGVyX3N0cmF0YWdlbV9ib3VuY2U=",
+    "bW9kcy9jb3dib3liaW5ndXMvaGVsbHBvZF9zdGVlcmluZ191bmxvY2tlZA==",
+    "bW9kcy9jb3dib3liaW5ndXMvd2lkZV9hbmdsZV9zdHJhdGFnZW1z",
+    "bW9kcy9jb3dib3liaW5ndXMvcmVpbmZvcmNlbWVudF9iZWFjb25fZml4X2RhdGE=",
+    "bW9kcy9jb3dib3liaW5ndXMvY29uc2lzdGVudF92YXVsdGluZw==",
+    "bW9kcy9jb3dib3liaW5ndXMvc2hhbGxvd193YXRlcl9kaXZl",
+    "bW9kcy9jb3dib3liaW5ndXMvc2VudHJ5X2FpbV9yZXRlbnRpb24=",
+    "bW9kcy9jb3dib3liaW5ndXMvY29ycHNlX2NvbGxpc2lvbl9yZXBhaXI=",
+    "bW9kcy9jb3dib3liaW5ndXMvdmVoaWNsZV9zdGFiaWxpdHk=",
+    "bW9kcy9jb3dib3liaW5ndXMvaG92ZXJfcGFja19jYW5jZWw=",
+    "bW9kcy9jb3dib3liaW5ndXMvZW5lbXlfaW50ZWxsaWdlbmNl",
+    "bW9kcy9jb2RleC9ndW5fY2FsaWJyYXRpb24=",
+    "bW9kcy9jb3dib3liaW5ndXMvYXJtb3J5X3ByZXZpZXdfY2FjaGU=",
+    "bW9kcy9jb3dib3liaW5ndXMvbW9kX2JpbmRpbmdzX21lbnU=",
+    "bW9kcy9jb3dib3liaW5ndXMvbW9kX29wdGlvbnNfbWVudQ==",
+    "bW9kcy9jaGVmL3NlYWZfYXJ0aWxsZXJ5X2xvYWRvdXQ=",
+    "bW9kcy9tb3J0YXIvbW9ydGFyX2h1ZA==",
+    "bW9kcy92ZWhpY2xlX3NlYXRfdG9vbHMvdmVoaWNsZV9zZWF0X3N3aXRjaA==",
+    "bW9kcy9lbmdsZS9lYWdsZV9odWRfcHJvYmU=",
+    "bW9kcy9yZXRyb3gvc2VudHJ5X2h1ZA==",
+    "bW9kcy93YXJib25kX2Rlc2svbWFpbg==",
+    "bW9kcy9hcmVuYV9sb2NhbC9tZWNoX3BhcnRfaHVk",
+    "bW9kcy9yZXRpY2xlX2FtbW8vaHVk",
+    "bW9kcy9wYXRwYXRwYXRyaWNrL2hlbG1ldF9oZWFkbGFtcA==",
+    "bW9kcy9kcml2ZXJodWQvZHJpdmVyX2h1ZA==",
+    "bW9kcy9jaGVmL3NtYXJ0ZXJfZ3VhcmRfZG9nc19hbmRfc2VudHJpZXM=",
+]
+
+_KNOWN_LDR_DECLS = [
+    _dec(s) for s in _KNOWN_LDR_PATHS
+]
+
+_LDR_DECL_RE = re.compile(
+    rb'-- HD2-Addon: (mods/[A-Za-z0-9_]+/[A-Za-z0-9_/]+)',
+    re.MULTILINE
+)
+
+def identify_installed_mods(parsed: dict) -> list:
+    found = set()
+    raw = parsed.get("_raw_bytes")
+    if raw is None:
+        raw_path = parsed.get("_raw_path")
+        if not raw_path:
+            return []
+        try:
+            with open(raw_path, "rb") as f:
+                raw = f.read()
+            parsed["_raw_bytes"] = raw
+        except Exception:
+            return []
+    for match in _LDR_DECL_RE.finditer(raw):
+        mod_path = match.group(1).decode('utf-8', errors='replace')
+        if '//' in mod_path or mod_path.endswith('/'):
+            continue
+        if mod_path == "mods/codex/loader":
+            continue
+        found.add(mod_path)
+    known_set = set(_KNOWN_LDR_DECLS)
+    result = []
+    for path in sorted(found):
+        result.append({"path": path, "known": path in known_set})
+    return result
+
+_KNOWN_LDRS: list = []
+
+def _register_ldr(ldr_id, version, sig_strings_b64, log_path_b64, bundle_hash_b64):
+    _KNOWN_LDRS.append({
+        "id": ldr_id,
+        "version": version,
+        "sigs": [_dec(s) for s in sig_strings_b64],
+        "log_path": _dec(log_path_b64) if log_path_b64 else "",
+        "bundle_hash": _dec(bundle_hash_b64) if bundle_hash_b64 else "",
+    })
+
+_register_ldr(
+    "MOD-LDR-01",
+    "v21",
+    [
+        "QmluZ3VzU2hhcmVkTG9hZGVy",
+        "Q293Ym95QmluZ3VzTW9kTG9hZGVy",
+        "SEQyTW9kTG9hZGVy",
+        "QmluZ3VzUnVudGltZQ==",
+        "bG9hZGVyLXYyMQ==",
+        "Q293Ym95QmluZ3VzL0hlbGxkaXZlcnMyL0xvZ3M=",
+    ],
+    "JUxPQ0FMQVBQREFUQSUvQ293Ym95QmluZ3VzL0hlbGxkaXZlcnMyL0xvZ3MvQmluZ3VzU2hhcmVkTG9hZGVyLmxvZw==",
+    "OWJhNjI2YWZhNDRhM2FhMw==",
+)
+
+def identify_ldrs(parsed, lua_mods):
+    identified = []
+    if not _KNOWN_LDRS:
+        return identified
+    for lm in lua_mods:
+        try:
+            base = int(lm.get("base", "0"), 16) if isinstance(lm.get("base"), str) else lm.get("base", 0)
+        except (ValueError, TypeError):
+            continue
+        if not base:
+            continue
+        size = lm.get("size", 0)
+        if not size or size < 256:
+            continue
+        read_size = min(size, 65536)
+        content = read_virtual_memory(parsed, base, read_size)
+        if not content:
+            continue
+        for ldr in _KNOWN_LDRS:
+            matched = []
+            for sig_str in ldr["sigs"]:
+                if sig_str.encode("utf-8", errors="ignore") in content:
+                    matched.append(sig_str)
+            if matched:
+                identified.append({
+                    "id": ldr["id"],
+                    "version": ldr["version"],
+                    "matched": len(matched),
+                    "total": len(ldr["sigs"]),
+                    "log_path": ldr["log_path"],
+                    "bundle_hash": ldr["bundle_hash"],
+                    "patch_file": lm.get("path", "?"),
+                    "patch_base": lm.get("base", "?"),
+                    "source": "patch_file_scan",
+                })
+    if identified:
+        return identified
+    raw = parsed.get("_raw_bytes")
+    if raw is None:
+        raw_path = parsed.get("_raw_path")
+        if not raw_path:
+            return identified
+        try:
+            with open(raw_path, "rb") as f:
+                raw = f.read()
+            parsed["_raw_bytes"] = raw
+        except Exception:
+            return identified
+    for ldr in _KNOWN_LDRS:
+        matched = []
+        for sig_str in ldr["sigs"]:
+            if sig_str.encode("utf-8", errors="ignore") in raw:
+                matched.append(sig_str)
+        if len(matched) >= 2:
+            identified.append({
+                "id": ldr["id"],
+                "version": ldr["version"],
+                "matched": len(matched),
+                "total": len(ldr["sigs"]),
+                "log_path": ldr["log_path"],
+                "bundle_hash": ldr["bundle_hash"],
+                "patch_file": "<memory scan>",
+                "patch_base": "?",
+                "source": "memory_scan",
+            })
+    return identified
+
+
+def parse_stingray_archive(parsed: dict, base_addr: int) -> dict:
+
+    result = {"magic_valid": False}
+    try:
+        # Read the header (72 bytes)
+        header = read_virtual_memory(parsed, base_addr, STINGRAY_ARCHIVE_HEADER_SIZE)
+        if not header or len(header) < STINGRAY_ARCHIVE_HEADER_SIZE:
+            return result
+
+        magic, num_types, num_entries = struct.unpack_from("<III", header, 0)
+        if magic != STINGRAY_ARCHIVE_MAGIC:
+            return result
+
+        result["magic_valid"] = True
+        result["num_types"] = num_types
+        result["num_entries"] = num_entries
+
+        # Calculate entry table position
+        table_start = STINGRAY_ARCHIVE_HEADER_SIZE + STINGRAY_ARCHIVE_TYPE_ENTRY_SIZE * num_types
+        # Read all entry rows (80 bytes each), up to a reasonable limit
+        max_entries = min(num_entries, 512)
+        entry_data = read_virtual_memory(parsed, base_addr + table_start,
+                                         STINGRAY_ARCHIVE_ENTRY_SIZE * max_entries)
+        if not entry_data:
+            return result
+
+        lua_entries = []
+        for i in range(max_entries):
+            offset = i * STINGRAY_ARCHIVE_ENTRY_SIZE
+            if offset + STINGRAY_ARCHIVE_ENTRY_SIZE > len(entry_data):
+                break
+            row = entry_data[offset:offset + STINGRAY_ARCHIVE_ENTRY_SIZE]
+
+            # Extract fields from the 80-byte entry row
+            resource_key = row[0:8]
+            type_id = row[8:16]
+            data_offset = struct.unpack_from("<Q", row, STINGRAY_ARCHIVE_ENTRY_DATA_OFFSET)[0]
+            data_length = struct.unpack_from("<I", row, STINGRAY_ARCHIVE_ENTRY_LENGTH_OFFSET)[0]
+
+            if type_id != LUA_TYPE_ID_SIGNATURE:
+                continue
+
+            resource_id_int = int.from_bytes(resource_key, 'little')
+            resource_name = lookup_resource_id(resource_id_int)
+
+            entry_info = {
+                "key_hex": resource_key.hex(),
+                "key_int": resource_id_int,
+                "resource_name": resource_name,
+                "offset": data_offset,
+                "length": data_length,
+            }
+
+            if data_offset > 0 and data_length >= 8:
+                envelope = read_virtual_memory(parsed, base_addr + data_offset, 8)
+                if envelope and len(envelope) >= 8:
+                    body_length, body_type = struct.unpack_from("<II", envelope, 0)
+                    entry_info["body_type"] = body_type
+                    entry_info["body_length"] = body_length
+                    entry_info["is_compiled"] = body_type != STINGRAY_LUA_SOURCE_TYPE
+
+                    if body_length > 0 and body_length < 1024 * 1024:
+                        preview = read_virtual_memory(parsed, base_addr + data_offset + 8,
+                                                      min(body_length, 16))
+                        if preview:
+                            if preview[:4] == LUA_BYTECODE_SIG:
+                                entry_info["is_compiled"] = True
+                                entry_info["bytecode_format"] = "Lua 5.1"
+                            elif preview[:3] == LUAJIT_BYTECODE_SIG:
+                                entry_info["is_compiled"] = True
+                                entry_info["bytecode_format"] = "LuaJIT"
+
+            lua_entries.append(entry_info)
+
+        result["lua_entries"] = lua_entries
+        result["lua_count"] = len(lua_entries)
+        result["compiled_count"] = sum(1 for e in lua_entries if e.get("is_compiled"))
+        result["source_count"] = result["lua_count"] - result["compiled_count"]
+
+    except Exception:
+        pass
+
+    return result
+
+
+
 def build_summary(parsed: dict) -> str:
 
     lines = []
+
+    try:
+        alignment_warnings = validate_pattern_alignment()
+        if alignment_warnings:
+            lines.append("── PATTERN ALIGNMENT WARNINGS ───────────────────────")
+            for w in alignment_warnings:
+                lines.append(f"  ⚠  {w}")
+            lines.append("")
+    except Exception:
+        pass
 
     ex_early = parsed.get("exception")
     if ex_early:
@@ -3814,6 +4384,23 @@ def build_summary(parsed: dict) -> str:
                 lines.append(f"  {conf_icon} [{rc['conf']}] {rc['title']}")
             if len(rootcause) > 3:
                 lines.append(f"  … and {len(rootcause)-3} more findings (see Root Cause tab for details)")
+    except Exception:
+        pass
+
+    try:
+        sigs = match_signatures(parsed)
+        if sigs:
+            lines.append("")
+            lines.append("── CRASH SIGNATURE MATCH ────────────────────────────────────────")
+            for sig in sigs:
+                status_icon = "✅" if sig["status"] == "resolved" else ("⚠️" if sig["status"] == "open" else "ℹ️")
+                lines.append(f"  {status_icon} [{sig['id']}]  {sig['title']}")
+                lines.append(f"     status: {sig['status']}")
+                lines.append(f"     evidence:")
+                for ev in sig["evidence"]:
+                    lines.append(f"       • {ev}")
+                lines.append(f"     recommended fix: {sig['fix']}")
+                lines.append("")
     except Exception:
         pass
 
@@ -3938,8 +4525,6 @@ def find_function_start(code: bytes, rva: int, max_search: int = 0x2000):
     return rva
 
 
-
-
 _ENTITY_DB_ENC = "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"
 _CRASH_PATTERNS_ENC = "7WOcNkfVpm2oZcHJbgDNXlbcc0+1Q5WSEvDvHTZ2PBGhCNaRBGzxUqLpSDRoL7JCH5SjcwLjYakw7bxm7BgdKBiCnj8X1axHZmE+EYHNOoMtIScDIEN7pu/RyXHkYIoIB4xIMfz+JHV01LteyLSzmKXUzCVZdqUoAJYD2ziuzqHHIURu8CQrLHqtfzM8BB/y8ULzqSKyUHiRj89LoSUYpmNf/354u8mfOALC0cK1yX2injAFq0U4LG/bDxUminjifzyKfJ3hebiLrNMc51PE2gtIbr+bQSY8RKwxKSYz7FuqRRhCL81ymz5Q6FbR4kkfy6BleiY/O7KJHd8ci4SWqzEQtSrtV4sjkvTnCQdIlIZZ0FlD2lEIIwwipMSzE/ifr+qJYtC4I+huNPAdIkINbO2h+jfF4duS8dGRG0IJbW7j1InACd4XAm8aXj8A0wzo6d5v0Q2DaKY3qKAwPUpA6kV0xbgsamUSWYo33ErT/p/nsNWlOHCLh/PdqjyVDEwbwhTIkMfqiRng3Cn2Zy9sg21ECP9sIIZrlx+tJtctFeo3NCf3vT4lN1+SW9/C9rt57tgdu6bkgyvscCQpNULXABj+TI2ZCjjf8nmBBH4SvqylhyT0KqecuRO+W6DEQ8CAT+2BcXoGGsi2Vk62GJBTV5QpCJfbg1oCkLqoXTbe713Olm4rxtciBo9+ahNyV81dSJdiXBoazDnK2rMpts7jRbxkrX7wpge5Mr5h96NKcjigojTdNJxvuC1NlqzWPEEtHBFVjuwTaT6WK6hKsAFAFa9p4l8nl5QPhuUm1ylJpE0iiXH/7mtxaz2BHAZ6hS2sqU2XCniipiquDds9PmCSGsHtAzuA6AsuH6n02yL/uYw5paVG2pErpaag+OnJBFEqiVHq8syxJvqXtilGroDry33Yp9y97dN3jXNU7XpCCTuQkzXYdWkcsNj1Xcq0sRVQGQtwFpjd8BI5f7U2m6N91liXxeiL7wOzUbgARP9V4MaAJftpqAhzk58c8DvVwu/ct7xKESC98wYDgqhl9uoZges1HWkTNI5J+11r8fMOsDkf1GFw0Alov6UGEopLInncQ4xkaTfrVJxzDqL9OA0Hx0QFIu4DQa38b6In/ylJs5j/6XC89a/YNMyADyrCT7FBEjnvvlJ1A85kpUk75ufb9MNJmWOFDdcUT/Ve8p+rUwEAwlozjhPGNUTTD796lPEpNHndoYR1j+9lNAznw0y37k4ywVzvyFlg7wIebomSFnBsWTNP/EkCZiNAPIBfVcE6n9lL4fHMgx0Pj0Wk8qEWpg7prNtKFzarU+4ro03MydfNPh4uqqPJ9AST7a+rrgQGFDHyIJ7ueHrmrj76esH2wNbHWhArgasu76MWwTWmS9iUL8A6ZI5BzfwoUwzTjJ5FxMwpVw=="
 _OBF_KEY = hashlib.sha256(b"StingrayCrashAnalyzer_v2.0.2").digest()
@@ -4056,8 +4641,8 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
                 "id": "AUDIO_VOICE_NULL_DEREF",
                 "description": "Audio voice null-deref during voice list iteration",
                 "cause": "The game iterates through a list of Wwise audio voice/emitter objects and calls a virtual method on each. One voice object (at index 21 / 0x15) is null - it was never initialized or was freed when an audio endpoint disappeared.",
-                "trigger": "Triggered by audio device changes during gameplay. Virtual audio devices (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create endpoints that Wwise fails to fully initialize. When the virtual device disconnects or changes state, the voice becomes null but stays in the iteration list. The game does not check for null before calling the virtual method.",
-                "fix": "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, VirtualBox audio). Set the default audio output to a single stable device (wired speakers or headphones, not Bluetooth). Disable unused audio endpoints in Windows Sound settings. If the crash persists, the game's audio system has a separate bug where voice entries are not cleaned up when endpoints disappear - report to Arrowhead with the crash offset and this pattern ID.",
+                "trigger": "Triggered by audio device changes during gameplay. Virtual audio devices (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create endpoints that Wwise fails to fully initialize. When the virtual device disconnects or changes state, the voice becomes null but stays in the iteration list.",
+                "fix": "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, VirtualBox audio). Set the default audio output to a single stable device (wired speakers or headphones, not Bluetooth). Disable unused audio endpoints in Windows Sound settings.",
                 "confidence": "HIGH",
             })
 
@@ -4065,9 +4650,9 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
             results.append({
                 "id": "REFCOUNT_PACKAGE_MULTI_RELEASE",
                 "description": "RefcountedPackageSystem multi-release crash during mission departure",
-                "cause": "The RefcountedPackageSystem releases the same packages (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6) three to four times each during the ship_planet_departure cutscene. This corrupts their reference counts - the underlying objects are freed while still referenced in iteration lists. The next engine tick tries to increment a freed object's refcount via LOCK XADD, hitting a null pointer at offset +0x1018.",
-                "trigger": "Triggered every time the player departs for a mission from the ship. The crash occurs approximately 1 second after the planet arrival cutscene ends. Reproduces deterministically across different users, different planets, fresh Windows accounts, and all system configuration changes tested (VC++ reinstall, SSD move, FPS lock, virtual device removal).",
-                "fix": "This is a game code bug in the RefcountedPackageSystem - no user-side fix exists. Report to Arrowhead with: crash offset helldivers2.exe +0x6AC699, the three package IDs being multi-released (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6), build 19411 / stingray:46659, and a --log-to-file console log showing the 4x release. The fix is to prevent the RefcountedPackageSystem from releasing the same package multiple times during the departure cutscene transition.",
+                "cause": "The RefcountedPackageSystem releases the same packages (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6) three to four times each during the ship_planet_departure cutscene. This corrupts their reference counts - the underlying objects are freed while still referenced in iteration lists.",
+                "trigger": "Triggered every time the player departs for a mission from the ship. Reproduces deterministically across different users, different planets, fresh Windows accounts, and all system configuration changes tested.",
+                "fix": "This is a game code bug - no user-side fix exists. Report to Arrowhead with the crash offset, the three package IDs, and a --log-to-file console log showing the 4x release.",
                 "confidence": "HIGH",
             })
 
@@ -5146,7 +5731,7 @@ def detect_mods(parsed: dict) -> dict:
         "\\arsenal\\":      "HD2 Arsenal (Helldivers 2 mod manager)",
         "hd2mm":            "HD2MM (Helldivers 2 Mod Manager)",
         "\\resourcelab\\":  "MDL Resource Lab (live resource mod staging)",
-        "\\medicfilemodmerger\\": "Medic File Mod Merger (direct game file modifier - modifies .dl_bin settings files on disk)",
+        "\\medicfilemodmerger\\": "Medic File Mod Merger (direct game file modifier)",
         "medicfilemodmerger": "Medic File Mod Merger (direct game file modifier)",
         "shodan":           "SHODAN Stat Editor (direct game stat/file modifier)",
         "\\shodan\\":       "SHODAN Stat Editor (direct game stat/file modifier)",
@@ -5237,18 +5822,10 @@ def detect_mods(parsed: dict) -> dict:
                 })
 
         if "appdata" in nl and "\\local\\" in nl and game_root and game_root not in nl:
-            if "\\mdl\\" in nl:
-                detail = (f"MDL (Mod Dynamic Loader) mod loaded from AppData: {name}. "
-                          f"MDL is a Stingray Lua mod loader that hooks the game's ESC menu "
-                          f"and can load/unload Lua mods at runtime. It also hooks Wwise audio "
-                          f"callbacks (core/wwise/lua/wwise_flow_callbacks). If the crash is "
-                          f"audio-related, MDL's Wwise hook may be a contributing factor.")
-            else:
-                detail = f"File loaded from AppData (possible mod config): {name}"
             indicators.append({
                 "type":   "appdata_mod",
                 "path":   name,
-                "detail": detail,
+                "detail": f"File loaded from AppData (possible mod config): {name}",
             })
 
     for m in modules:
@@ -5285,16 +5862,57 @@ def detect_mods(parsed: dict) -> dict:
             })
 
     lua_mods = _detect_lua_mods(parsed)
+    identified_ldrs = identify_ldrs(parsed, lua_mods)
+    identified_mods = identify_installed_mods(parsed)
+    for ldr in identified_ldrs:
+        indicators.append({
+            "type":   "ldr_id",
+            "path":   ldr.get("patch_file", "?"),
+            "detail": f"Identified mod loader: {ldr['id']} {ldr['version']} "
+                      f"(matched {ldr['matched']}/{ldr['total']} signatures, "
+                      f"source: {ldr.get('source', '?')})",
+            "tier":   "confirmed",
+        })
+    for mod in identified_mods:
+        known_tag = " (known)" if mod["known"] else " (unknown)"
+        indicators.append({
+            "type":   "identified_mod",
+            "path":   mod["path"],
+            "detail": f"Mod identified via declaration: {mod['path']}{known_tag}",
+            "tier":   "confirmed",
+        })
     for lm in lua_mods:
-        detail = (
+        try:
+            lm_base = int(lm.get("base", "0"), 16) if isinstance(lm.get("base"), str) else lm.get("base", 0)
+        except (ValueError, TypeError):
+            lm_base = 0
+        archive_info = parse_stingray_archive(parsed, lm_base) if lm_base else {"magic_valid": False}
+
+        detail_parts = [
             f"Lua mod patch file detected: {PureWindowsPath(lm['path']).name} "
             f"in data folder. No legitimate game file uses .patch_* naming - "
             f"this is a Lua mod. {lm.get('reason', '')}"
-        )
+        ]
+        if archive_info.get("magic_valid"):
+            lua_count = archive_info.get("lua_count", 0)
+            compiled = archive_info.get("compiled_count", 0)
+            source = archive_info.get("source_count", 0)
+            detail_parts.append(
+                f"Archive parsed: {lua_count} Lua resource(s) "
+                f"({source} source, {compiled} compiled bytecode)."
+            )
+            if compiled > 0:
+                detail_parts.append(
+                    f"WARNING: {compiled} compiled Lua chunk(s) detected - "
+                    f"compiled mods may cause 'bad header in precompiled chunk' errors "
+                    f"on builds that switched from LuaJIT to PUC-Rio Lua 5.1."
+                )
+        lm["archive_info"] = archive_info
+
         indicators.append({
             "type":   "lua_mod",
             "path":   lm["path"],
-            "detail": detail,
+            "detail": " ".join(detail_parts),
             "tier":   "confirmed",
         })
 
@@ -5327,11 +5945,13 @@ def detect_mods(parsed: dict) -> dict:
                   "LOW"  if severities else "LOW")
 
     return {
-        "has_mods":   has_mods,
-        "confidence": confidence,
-        "game_root":  game_root,
-        "indicators": unique,
-        "lua_mods":   lua_mods,
+        "has_mods":            has_mods,
+        "confidence":          confidence,
+        "game_root":           game_root,
+        "indicators":          unique,
+        "lua_mods":            lua_mods,
+        "identified_ldrs":     identified_ldrs,
+        "identified_mods":     identified_mods,
     }
 
 PATTERN_FILE = resource_path("crash_patterns.json")
@@ -5351,6 +5971,50 @@ def load_custom_patterns() -> list:
 
     data = _load_pattern_file()
     return [p for p in data.get("patterns", []) if p.get("enabled", True)]
+
+def validate_pattern_alignment() -> list:
+
+    warnings = []
+    data = _load_pattern_file()
+
+    code_sig_ids = {sig["id"] for sig in CRASH_SIGNATURES}
+    for p in data.get("patterns", []):
+        pid = p.get("id", "")
+        if pid in code_sig_ids:
+            warnings.append(
+                f"Pattern '{pid}' in patterns[] overlaps with code CRASH_SIGNATURES. "
+                f"The code signature will take precedence and this JSON pattern will be "
+                f"filtered out to avoid duplicate reporting. Remove it from patterns[] "
+                f"to clean up."
+            )
+
+    VALID_BUILTIN_IDS = {
+        "LUA_MOD_DETECTED", "RESHADE_DIRECT_CRASH", "RESHADE_D3D_CORRUPTION",
+        "PROXY_DLL_CRASH", "MOD_CRASH", "DUAL_GPU_DRIVER_CRASH", "GPU_DRIVER_CRASH",
+        "DXGI_DEVICE_LOST", "STACK_OVERFLOW", "HEAP_CORRUPTION", "CPP_EXCEPTION",
+        "ILLEGAL_INSTR", "DLL_NOT_FOUND", "DLL_INIT_FAILED", "IN_PAGE_ERROR",
+        "PURE_VIRTUAL_CALL", "NULL_DEREF_READ", "NEAR_NULL_READ", "NULL_DEREF_WRITE",
+        "INT_DIVIDE_BY_ZERO", "FLOAT_DIVIDE_BY_ZERO", "FLOAT_INVALID", "INT_OVERFLOW",
+        "PRIVILEGED_INSTR", "ARRAY_BOUNDS", "INVALID_HANDLE", "INVALID_CRT_PARAM",
+        "ACCESS_DENIED", "OUT_OF_MEMORY", "NOT_MAPPED", "ASSERTION_FAILURE",
+        "STACK_BUFFER_OVERRUN", "GUARD_PAGE", "MISALIGNMENT", "ENTRY_POINT_NOT_FOUND",
+        "NTDLL_HEAP_FAULT", "ANTICHEAT_CRASH", "BINK_VIDEO_CRASH", "STEAM_API_CRASH",
+        "GAMEGUARD_CRASH", "WWISE_CRASH", "FMOD_CRASH", "PHYSX_CRASH", "LUA_CRASH",
+        "DSTORAGE_CRASH", "POSSIBLE_USE_AFTER_FREE", "CRASH_HANDLER_FAULT",
+        "SUICIDE_DSTORAGE", "SUICIDE_LUA", "SUICIDE_AUDIO", "SUICIDE_GPU",
+        "SUICIDE_NETWORK", "SUICIDE_PHYSICS", "SUICIDE_SAVEGAME",
+        "SUICIDE_LEVEL_STREAMING", "SUICIDE_ANIMATION", "SUICIDE_UI",
+        "SUICIDE_ENTITY", "SUICIDE_RESOURCE", "SUICIDE_SHADER", "SUICIDE_GENERIC",
+    }
+    for p in data.get("builtin_patterns", []):
+        pid = p.get("id", "")
+        if pid not in VALID_BUILTIN_IDS:
+            warnings.append(
+                f"Builtin pattern '{pid}' in builtin_patterns[] is not a recognized "
+                f"code pattern ID. This entry does nothing and can be removed."
+            )
+
+    return warnings
 
 def get_builtin_override(pattern_id: str) -> "dict | None":
 
@@ -5461,6 +6125,62 @@ def _match_all_custom_patterns(parsed: dict, decoded_instr: "dict | None",
             if "lua_mod_present" in m:
                 lua_detected = bool(mods.get("lua_mods"))
                 if bool(m["lua_mod_present"]) != lua_detected: continue
+            if "ex_param_0" in m:
+                try:
+                    target_p0 = int(m["ex_param_0"], 16) if isinstance(m["ex_param_0"], str) else int(m["ex_param_0"])
+                except Exception:
+                    continue
+                actual_p0 = int(params[0], 16) if len(params) >= 1 and params[0] else 0
+                if actual_p0 != target_p0:
+                    continue
+            if "null_register" in m:
+                regs = ex.get("regs", {})
+                reg_names = m["null_register"]
+                if isinstance(reg_names, str):
+                    reg_names = [reg_names]
+                all_null = True
+                for rn in reg_names:
+                    val = regs.get(rn.lower(), regs.get(rn.upper(), None))
+                    if val is not None and val != 0:
+                        all_null = False
+                        break
+                if not all_null:
+                    continue
+            if "call_chain_offset" in m:
+                co = m["call_chain_offset"]
+                target_mod = co.get("module", "").lower()
+                try:
+                    target_off = int(co.get("offset", "0"), 16)
+                except Exception:
+                    continue
+                try:
+                    chain = _reconstruct_call_chain(parsed)
+                except Exception:
+                    chain = []
+                found_in_chain = False
+                for _, cmod, coff in chain:
+                    if cmod.lower() == target_mod and coff == target_off:
+                        found_in_chain = True
+                        break
+                if not found_in_chain:
+                    continue
+
+            if "call_chain_offset_repeat" in m:
+                cr = m["call_chain_offset_repeat"]
+                target_mod = cr.get("module", "").lower()
+                try:
+                    target_off = int(cr.get("offset", "0"), 16)
+                except Exception:
+                    continue
+                min_count = int(cr.get("min_count", 2))
+                try:
+                    chain = _reconstruct_call_chain(parsed)
+                except Exception:
+                    chain = []
+                actual_count = sum(1 for _, cmod, coff in chain
+                                   if cmod.lower() == target_mod and coff == target_off)
+                if actual_count < min_count:
+                    continue
         except Exception:
             continue
 
@@ -5492,6 +6212,10 @@ def _builtin(pattern_id: str, default: dict) -> "dict | None":
 def _match_all_patterns(parsed: dict, decoded_instr: "dict | None",
                         mods: dict, rootcause: list) -> list:
     custom_matches = _match_all_custom_patterns(parsed, decoded_instr, mods)
+    custom_ids     = {c["id"] for c in custom_matches}
+
+    code_sig_ids = {sig["id"] for sig in CRASH_SIGNATURES}
+    custom_matches = [c for c in custom_matches if c["id"] not in code_sig_ids]
     custom_ids     = {c["id"] for c in custom_matches}
 
     builtin = _match_patterns(parsed, decoded_instr, mods, rootcause)
@@ -7325,7 +8049,76 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
     is_eac_tamper = any("EAC anti-tamper" in f.get("title", "") for f in rootcause)
     _signature_set = False
 
-    if is_eac_tamper:
+    known_sig = None
+    known_sig_type = None
+    try:
+        code_sigs = match_signatures(parsed)
+        if code_sigs:
+            known_sig = code_sigs[0]
+            known_sig_type = "code"
+    except Exception:
+        pass
+
+    if known_sig is None:
+        try:
+            json_sigs = _match_all_custom_patterns(parsed, decoded_instr, mods or {})
+            code_sig_ids = {s["id"] for s in CRASH_SIGNATURES}
+            json_sigs = [s for s in json_sigs if s["id"] not in code_sig_ids]
+            if json_sigs:
+                known_sig = json_sigs[0]
+                known_sig_type = "json"
+        except Exception:
+            pass
+
+    if known_sig is not None:
+        verdict = "GAME_BUG"
+        color = V_GAME_BUG
+        if known_sig_type == "code":
+            title = known_sig.get("title", "Known crash signature")
+            status = known_sig.get("status", "open")
+            fix = known_sig.get("fix", "")
+            evidence = known_sig.get("evidence", [])
+            sig_id = known_sig.get("id", "SIG-UNKNOWN")
+            if status == "resolved":
+                status_icon = "✅"
+                status_text = f"RESOLVED: {fix}" if fix else "RESOLVED"
+            else:
+                status_icon = "⚠️"
+                status_text = f"OPEN: {fix}" if fix else "OPEN (no confirmed fix yet)"
+            explanation = (
+                f"{status_icon} Known crash signature: {sig_id}\n"
+                f"Status: {status_text}\n\n"
+                f"Root cause: {title}\n\n"
+                f"Evidence:\n" + "\n".join(f"  • {e}" for e in evidence)
+            )
+            confidence = "HIGH"
+            signature = sig_id
+            _signature_set = True
+        else:
+            title = known_sig.get("name", "Known crash pattern")
+            player_msg = known_sig.get("player_message", "")
+            fix_steps = known_sig.get("fix", [])
+            dev_note = known_sig.get("dev_note", "")
+            sig_id = known_sig.get("id", "CUSTOM")
+            fix_text = " ".join(fix_steps) if isinstance(fix_steps, list) else str(fix_steps)
+            explanation = (
+                f"Known crash pattern: {sig_id}\n"
+                f"{player_msg}\n\n"
+                f"Fix: {fix_text}"
+            )
+            confidence = known_sig.get("confidence", "MED")
+            signature = sig_id
+            _signature_set = True
+        actions = [
+            {"label": "1. View evidence", "command": "goto_rootcause", "primary": True,
+             "description": "See the full root cause analysis and call chain"},
+            {"label": "2. Export report", "command": "export", "primary": False,
+             "description": "Generate a PDF to share with the dev team (mention the signature ID)"},
+            {"label": "3. Open .log file", "command": "open_log", "primary": False,
+             "description": "The engine log may have additional context"},
+        ]
+
+    elif is_eac_tamper:
         verdict = "MOD"
         color = V_MOD
         title = "EAC anti-tamper detection (code modification)"
@@ -7536,7 +8329,6 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
         "actions": actions,
         "signature": signature,
     }
-
 
 
 class VerdictBanner(tk.Frame):
@@ -7833,6 +8625,9 @@ class CallChainWidget(tk.Frame):
                      bg=BG, fg=TEXT_DIM, font=(UI_FONT, 8)).pack(anchor="w")
             return
 
+        from collections import Counter as _Counter
+        _repeat_counts = _Counter((m, o) for _, m, o in chain)
+        _seen_so_far: dict = {}
         for i, (addr, mod, off) in enumerate(chain):
             is_crash = (i == 0)
             verified = extended[i][3] if extended and i < len(extended) else None
@@ -7864,6 +8659,18 @@ class CallChainWidget(tk.Frame):
                          font=(UI_MONO, 7)).pack(side="left", padx=(8, 0))
             elif verified is False:
                 tk.Label(frame_row, text="[heuristic]", bg=BG, fg=YELLOW,
+                         font=(UI_MONO, 7)).pack(side="left", padx=(8, 0))
+
+            key = (mod, off)
+            total = _repeat_counts.get(key, 1)
+            if total > 1:
+                _seen_so_far[key] = _seen_so_far.get(key, 0) + 1
+                occ = _seen_so_far[key]
+                if occ == 1:
+                    rtext = f"[repeat ×{total}]"
+                else:
+                    rtext = f"[repeat ×{total} #{occ}]"
+                tk.Label(frame_row, text=rtext, bg=BG, fg=PURPLE,
                          font=(UI_MONO, 7)).pack(side="left", padx=(8, 0))
 
         pdata_c = unwind_info.get("pdata_confirmed", 0)
@@ -11294,7 +12101,7 @@ class CrashAnalyzerUI(_BaseWindow):
 
         elif scenario == "appdata_mod":
             p["modules"].append({
-                "name": "C:\\Users\\Player\\AppData\\Local\\SomeModLoader\\inject.dll",
+                "name": "C:\\Users\\Player\\AppData\\Local\\ThirdParty\\inject.dll",
                 "base": "0x00007FF6A8000000", "size": 310_000,
                 "checksum": "0x00050A00", "timestamp": "2025-08-15",
                 "version": "2.1.0.0",
