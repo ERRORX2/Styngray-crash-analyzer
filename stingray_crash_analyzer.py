@@ -46,6 +46,11 @@ def resource_path(*parts: str) -> Path:
 _SETTINGS_DIR  = Path.home() / ".stingray_crash_analyzer"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
+_CURRENT_VERSION = "2.1.0"
+_GITHUB_REPO = "ERRORX2/Styngray-crash-analyzer"
+_IGNORED_VERSION = ""
+_UPDATES_DISABLED = False
+
 _FONT_SCALE          = 1.0
 _DEFAULT_FONT_SCALE  = 1.0
 _MIN_FONT_SCALE      = 0.75
@@ -57,7 +62,7 @@ _BASE_TAG_FONTS: dict = {}
 
 
 def _load_settings() -> None:
-    global _FONT_SCALE
+    global _FONT_SCALE, _IGNORED_VERSION, _UPDATES_DISABLED
     try:
         if _SETTINGS_FILE.exists():
             with open(_SETTINGS_FILE, encoding="utf-8") as f:
@@ -65,6 +70,8 @@ def _load_settings() -> None:
             s = float(data.get("font_scale", _DEFAULT_FONT_SCALE))
             if _MIN_FONT_SCALE <= s <= _MAX_FONT_SCALE:
                 _FONT_SCALE = s
+            _IGNORED_VERSION = data.get("ignored_version", "")
+            _UPDATES_DISABLED = data.get("updates_disabled", False)
     except Exception:
         pass
 
@@ -73,7 +80,9 @@ def _save_settings() -> None:
     try:
         _SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
         with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({"font_scale": _FONT_SCALE}, f)
+            json.dump({"font_scale": _FONT_SCALE,
+                       "ignored_version": _IGNORED_VERSION,
+                       "updates_disabled": _UPDATES_DISABLED}, f)
     except Exception:
         pass
 
@@ -3484,15 +3493,24 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
                     "link": None,
                 })
             elif fault_addr == 0:
-                findings.append({"conf": "HIGH",
-                    "title": f"Null pointer {op} at 0x0",
-                    "detail": (f"The engine attempted to {op} address 0x0. "
+                _null_detail = (f"The engine attempted to {op} address 0x0. "
                                f"In Stingray this typically means an object pointer was never initialized, "
                                f"or an object was destroyed and its pointer was not cleared before use. "
                                + (decoded_instr["explanation"] if decoded_instr else
                                   "A write to null is often a destroyed object still being updated." if op == "write"
                                   else "A read from null is often a missing resource or uninitialized component.")
-                               + (f" RCX=0x{crash_rcx:016X}" if crash_rcx is not None else "")),
+                               + (f" RCX=0x{crash_rcx:016X}" if crash_rcx is not None else ""))
+                try:
+                    _null_sigs = match_signatures(parsed)
+                    if _null_sigs:
+                        _null_detail += (f" NOTE: This crash matches known signature {_null_sigs[0]['id']}. "
+                                         f"The null write is a symptom of the signature's root cause, "
+                                         f"not a standalone issue. Follow the signature's fix recommendation.")
+                except Exception:
+                    pass
+                findings.append({"conf": "HIGH",
+                    "title": f"Null pointer {op} at 0x0",
+                    "detail": _null_detail,
                     "link": None,
                 })
             elif fault_addr < 0x100:
@@ -3614,22 +3632,38 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
             reg, val = next(iter(null_regs.items()))
             confirmed_str = (" This matches the base register in the crash instruction - "
                             f"confirmed: {bad_reg} was the null pointer." if bad_reg and bad_reg == reg else "")
+            reg_detail = (f"{reg} = 0x{val:016X} - captured at the exact CPU state of the fault "
+                          f"before any exception handler ran.{confirmed_str} "
+                          f"{reg} held a null pointer that was dereferenced or called.")
+            if reg == "RCX" and fault_addr == 0x1018 and crash_off == 0x6AC699:
+                reg_detail += (
+                    f" NOTE: RCX being null at this crash site indicates the "
+                    f"RefcountedPackageSystem reference map is full. The map returned "
+                    f"no slot (null) and the engine attempted to write reference data "
+                    f"to [null + 0x1018]. This is a known bug (SIG-HD2-REF-01)."
+                )
             findings.append({"conf": "HIGH",
                 "title": f"Register {reg} was null at crash time (ExceptionStream confirmed)",
-                "detail": (f"{reg} = 0x{val:016X} - captured at the exact CPU state of the fault "
-                           f"before any exception handler ran.{confirmed_str} "
-                           f"{reg} held a null pointer that was dereferenced or called."),
+                "detail": reg_detail,
                 "link": None,
             })
         elif len(null_regs) <= 4:
             reg_list = ", ".join(null_regs.keys())
             bad_str  = f" Instruction analysis points to {bad_reg} as the base pointer." if bad_reg else ""
+            multi_detail = (f"Registers {reg_list} were all zero at crash time (ExceptionStream).{bad_str} "
+                            f"Multiple nulls can indicate an uninitialised struct, "
+                            f"a use-after-free where the freed block was zeroed, "
+                            f"or a C++ object whose constructor never ran.")
+            if "rcx" in null_regs and fault_addr == 0x1018 and crash_off == 0x6AC699:
+                multi_detail += (
+                    f" NOTE: RCX being null at this crash site indicates the "
+                    f"RefcountedPackageSystem reference map is full. The map returned "
+                    f"no slot (null) and the engine attempted to write reference data "
+                    f"to [null + 0x1018]. This is a known bug (SIG-HD2-REF-01)."
+                )
             findings.append({"conf": "MED",
                 "title": f"Multiple null registers at crash: {reg_list}",
-                "detail": (f"Registers {reg_list} were all zero at crash time (ExceptionStream).{bad_str} "
-                           f"Multiple nulls can indicate an uninitialised struct, "
-                           f"a use-after-free where the freed block was zeroed, "
-                           f"or a C++ object whose constructor never ran."),
+                "detail": multi_detail,
                 "link": None,
             })
         else:
@@ -3891,11 +3925,6 @@ def _match_sig_hd2_ssr_01(parsed: dict):
     params = ex.get("params", [])
     if len(params) < 2:
         return False, []
-    try:
-        if int(params[0], 16) != 0x0:
-            return False, []
-    except (ValueError, TypeError):
-        return False, []
     fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
     if fault_mod != "helldivers2.exe":
         return False, []
@@ -3910,23 +3939,43 @@ def _match_sig_hd2_ssr_01(parsed: dict):
             region_counts[o] += 1
     repeating_in_region = {off: cnt for off, cnt in region_counts.items() if cnt >= 2}
     total_region_repeats = sum(repeating_in_region.values())
-    if total_region_repeats < 3:
+    total_region_frames = sum(region_counts.values())
+    if total_region_repeats < 3 and total_region_frames < 2:
         return False, []
     sentinel_count = _sig_sentinel_count(chain)
-    if sentinel_count < 3:
+    if sentinel_count < 3 and total_region_repeats < 3 and total_region_frames < 3:
         return False, []
+    p0 = int(params[0], 16) if params[0] else 0
+    op_str = {0: "READ", 1: "WRITE", 8: "EXECUTE"}.get(p0, "unknown")
     fault_addr = params[1] if len(params) >= 2 else "?"
     hub_desc = ", ".join("+0x%X x%d" % (off, cnt)
                          for off, cnt in sorted(repeating_in_region.items()))
+    if not hub_desc:
+        hub_desc = "%d frame(s) in region (no repeats - early catch)" % total_region_frames
+    regs = ex.get("regs", {})
+    rcx_val = regs.get("rcx", None)
+    rcx_null = isinstance(rcx_val, int) and rcx_val == 0
+    rax_val = regs.get("rax", None)
+    rax_null = isinstance(rax_val, int) and rax_val == 0
+    if rcx_null:
+        fix_text = "clean reinstall of the game"
+        root_cause = "package/install data corruption (RCX=0 indicates deep corruption)"
+    elif rax_null:
+        fix_text = "clean reinstall of the game"
+        root_cause = "package/install data corruption (RAX=0 indicates deep corruption)"
+    else:
+        fix_text = "clear shader cache and delete user_settings.config"
+        root_cause = "shader/settings corruption (RCX not null indicates lighter corruption)"
     evidence = [
-        "exception 0xC0000005 (READ)",
+        "exception 0xC0000005 (%s)" % op_str,
         "faulting module helldivers2.exe +0x%X (varies by machine)" % fault_off,
         "faulting address 0x%s (corrupted pointer; exact value varies by machine)" % fault_addr,
         "recursion in +0x170xxxx region: %s (root cause)" % hub_desc,
         "total repeating frames in region: %d" % total_region_repeats,
-        "stack-smash sentinels (0xFFFFFFFF): %d (confirms stack overflow)" % sentinel_count,
-        "root cause: unbounded recursion through helldivers2.exe +0x170xxxx code region",
-        "fix: clean reinstall of the game (confirmed on DESKTOP-9RQIU4F)",
+        "stack-smash sentinels (0xFFFFFFFF): %d" % sentinel_count,
+        "RCX=0x%X %s" % (rcx_val if isinstance(rcx_val, int) else 0, "(null → reinstall)" if rcx_null else "(not null → shader cache)"),
+        "root cause: %s" % root_cause,
+        "fix: %s" % fix_text,
     ]
     return True, evidence
 
@@ -3934,12 +3983,11 @@ _register_signature(
     "SIG-HD2-SSR-01",
     "Helldivers 2 Stingray Setup Recursion (build 19411)",
     "resolved",
-    "Clean reinstall of the game. Steam 'Verify Integrity' may be insufficient; "
-    "a full wipe-and-reinstall was required in the confirmed case. Disk health "
-    "check on the install drive is recommended as follow-up. "
-    "The exact crash offset and faulting address vary by machine; the "
-    "root cause is the recursion through helldivers2.exe +0x170xxxx code region, not the "
-    "specific crash site.",
+    "RCX=0 (or RAX=0): clean reinstall of the game. "
+    "RCX not null: clear shader cache and delete user_settings.config. "
+    "The root cause is recursion through helldivers2.exe +0x170xxxx code region; "
+    "RCX being null indicates package data corruption (reinstall), "
+    "RCX not null indicates shader/settings corruption (cache clear).",
     _match_sig_hd2_ssr_01,
 )
 
@@ -4001,6 +4049,144 @@ _register_signature(
     "Arrowhead with dump + build identifier. Engine log (--log-to-file) needed to "
     "identify what the engine was doing when the corruption occurred.",
     _match_sig_hd2_vtc_01,
+)
+
+
+def _match_sig_hd2_ref_01(parsed: dict):
+    """SIG-HD2-REF-01: RefcountedPackageSystem reference map overflow.
+
+    The RefcountedPackageSystem accumulates package references without releasing
+    them, filling its internal reference map. The map has no overflow guard -
+    when full, it returns null and the engine writes to [null + 0x1018].
+
+    Engine log comparison: 23 requests / 0 releases on crashing machine vs
+    26 requests / 17 releases on non-crashing machine. Package 0FE88D9B08F6FE80
+    reaches ref_count=3 on crashing, 1 on non-crashing.
+
+    Crash: WRITE to 0x1018 at helldivers2.exe +0x6AC699, RCX=0, RAX=0x58.
+    Trigger: ~53 seconds after entering Ship state, standing still.
+    Fix: no user-side fix. Try changing loadout or clearing cloud save.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) != 0x1:
+            return False, []
+        if int(params[1], 16) != 0x1018:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
+    if fault_mod != "helldivers2.exe" or fault_off != 0x6AC699:
+        return False, []
+    regs = ex.get("regs", {})
+    if regs.get("rcx") != 0 or regs.get("rax") != 0x58:
+        return False, []
+    evidence = [
+        "exception 0xC0000005 (WRITE) at 0x1018",
+        "crash at helldivers2.exe +0x6AC699",
+        "RCX=0 (null - reference map full, no slot available)",
+        "RAX=0x58 (reference data being written to null slot)",
+        "RefcountedPackageSystem reference map overflow",
+        "engine log: 0 releases on affected machines (17 on non-crashing)",
+        "trigger: ~53 seconds after entering Ship state, standing still",
+        "no user-side fix - try changing loadout or clearing cloud save",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-REF-01",
+    "Helldivers 2 RefcountedPackageSystem reference map overflow",
+    "open",
+    "No user-side fix confirmed. The RefcountedPackageSystem accumulates "
+    "references without releasing them, filling its reference map. The map "
+    "has no overflow guard. Try changing loadout or clearing cloud save. "
+    "Report to Arrowhead with crash offset +0x6AC699, WRITE to 0x1018, "
+    "and a --log-to-file engine log showing 0 releases.",
+    _match_sig_hd2_ref_01,
+)
+
+
+def _match_sig_hd2_scs_01(parsed: dict):
+    """SIG-HD2-SCS-01: Shader/settings corruption triggering engine init recursion.
+
+    Same +0x170xxxx recursion region as SSR-01, but WITHOUT stack-smash
+    sentinels (0 sentinels vs 3+ for SSR-01). The corruption is lighter --
+    shader cache or user_settings.config is corrupted, not the package data.
+
+    Fix: clear shader cache and delete user_settings.config.
+    Confirmed on FS-1041: solved by clearing shader cache + deleting
+    user_settings.config.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) not in (0x0, 0x1):
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
+    if fault_mod != "helldivers2.exe":
+        return False, []
+    try:
+        chain = _reconstruct_call_chain(parsed)
+    except Exception:
+        chain = []
+    from collections import Counter as _Counter
+    region_counts = _Counter()
+    for _, m, o in chain:
+        if m == "helldivers2.exe" and 0x1700000 <= o < 0x1800000:
+            region_counts[o] += 1
+    repeating_in_region = {off: cnt for off, cnt in region_counts.items() if cnt >= 2}
+    total_region_repeats = sum(repeating_in_region.values())
+    if total_region_repeats < 3:
+        return False, []
+    sentinel_count = _sig_sentinel_count(chain)
+    if sentinel_count >= 3:
+        return False, []
+    p0 = int(params[0], 16) if params[0] else 0
+    op_str = {0: "READ", 1: "WRITE", 8: "EXECUTE"}.get(p0, "unknown")
+    fault_addr = params[1] if len(params) >= 2 else "?"
+    hub_desc = ", ".join("+0x%X x%d" % (off, cnt)
+                         for off, cnt in sorted(repeating_in_region.items()))
+    evidence = [
+        "exception 0xC0000005 (%s)" % op_str,
+        "faulting module helldivers2.exe +0x%X" % fault_off,
+        "faulting address 0x%s" % fault_addr,
+        "recursion in +0x170xxxx region: %s" % hub_desc,
+        "total repeating frames in region: %d" % total_region_repeats,
+        "stack-smash sentinels: %d (<3, distinguishes from SSR-01)" % sentinel_count,
+        "root cause: corrupted shader cache or user_settings.config",
+        "fix: clear shader cache and delete user_settings.config",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-SCS-01",
+    "Helldivers 2 shader/settings corruption triggering engine init recursion",
+    "resolved",
+    "Clear shader cache and delete user_settings.config. "
+    "Same +0x170xxxx recursion as SSR-01 but without stack-smash sentinels, "
+    "indicating lighter corruption (shader/settings vs package data).",
+    _match_sig_hd2_scs_01,
 )
 
 
@@ -4648,11 +4834,25 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
 
         if crash_off == 0x6AC699 and rax == 0x58 and rcx == 0 and fault_addr == 0x1018:
             results.append({
-                "id": "REFCOUNT_PACKAGE_MULTI_RELEASE",
-                "description": "RefcountedPackageSystem multi-release crash during mission departure",
-                "cause": "The RefcountedPackageSystem releases the same packages (85D392768BF6A259, 804E40C3115E9650, 96018F36679804A6) three to four times each during the ship_planet_departure cutscene. This corrupts their reference counts - the underlying objects are freed while still referenced in iteration lists.",
-                "trigger": "Triggered every time the player departs for a mission from the ship. Reproduces deterministically across different users, different planets, fresh Windows accounts, and all system configuration changes tested.",
-                "fix": "This is a game code bug - no user-side fix exists. Report to Arrowhead with the crash offset, the three package IDs, and a --log-to-file console log showing the 4x release.",
+                "id": "REFCOUNT_PACKAGE_OVERFLOW",
+                "description": "RefcountedPackageSystem reference map overflow",
+                "cause": (
+                    "The RefcountedPackageSystem accumulates references without releasing them. "
+                    "Engine log comparison: 23 requests / 0 releases on crashing machine vs "
+                    "26 requests / 17 releases on non-crashing machine. "
+                    "Package 0FE88D9B08F6FE80 reaches ref_count=3 on crashing, 1 on non-crashing. "
+                    "The map has no overflow guard. When full, it returns null and the engine "
+                    "writes to [null + 0x1018]."
+                ),
+                "trigger": (
+                    "~53 seconds after entering Ship state, standing still. "
+                    "Time-based, not action-based. Not all machines affected."
+                ),
+                "fix": (
+                    "No user-side fix. Try changing loadout or clearing cloud save. "
+                    "Report to Arrowhead: crash at helldivers2.exe+0x6AC699, WRITE to 0x1018, "
+                    "engine log showing 0 releases."
+                ),
                 "confidence": "HIGH",
             })
 
@@ -4968,15 +5168,15 @@ def decode_crash_instruction(mem: bytes, crash_addr: int) -> dict:
                 target = disp & 0xFFFFFFFF
                 if target == 0:
                     return {
-                        "is_suicide": True,
+                        "is_suicide": False,
                         "instruction": f"MOV [0x{target:08X}], {src_reg}",
                         "explanation": (
-                            f"The engine explicitly wrote to absolute address 0x0 using a hardcoded address. "
-                            f"This encoding (MOV [imm32], reg) cannot happen by accident - "
-                            f"the crash address is burned into the instruction itself. "
-                            f"This is the Stingray engine suicide pattern."
+                            f"Write to absolute address 0x0 via hardcoded address. "
+                            f"This could be the Stingray engine suicide pattern OR a null "
+                            f"pointer write from corrupted state (e.g. +0x170xxxx recursion). "
+                            f"Check the crash signature and call chain to determine the real cause."
                         ),
-                        "confidence": "HIGH",
+                        "confidence": "MED",
                     }
                 else:
                     return {
@@ -5737,6 +5937,15 @@ def detect_mods(parsed: dict) -> dict:
         "\\shodan\\":       "SHODAN Stat Editor (direct game stat/file modifier)",
         "luna's loader":    "Luna's Loader (game file modifier)",
         "lunasloader":      "Luna's Loader (game file modifier)",
+        "asproxy64":        "Astrill VPN network proxy injection (causes stack overflow in engine networking)",
+        "asproxy":          "Astrill VPN network proxy injection",
+        "astrill":          "Astrill VPN",
+        "\\tap-windows\\":  "VPN TAP adapter driver (OpenVPN)",
+        "wintun":           "WinTun VPN tunnel driver (WireGuard)",
+        "openvpn":          "OpenVPN",
+        "nordvpn":          "NordVPN network injection",
+        "expressvpn":       "ExpressVPN network injection",
+        "surfshark":        "Surfshark VPN network injection",
     }
 
     PROXY_SYSTEM_DLLS: dict[str, str] = {
@@ -5861,6 +6070,26 @@ def detect_mods(parsed: dict) -> dict:
                 ),
             })
 
+    _dll_load_counts: dict = {}
+    for m in modules:
+        sn = PureWindowsPath(m.get("name", "")).name.lower()
+        _dll_load_counts[sn] = _dll_load_counts.get(sn, 0) + 1
+    for dll_name, count in _dll_load_counts.items():
+        if count > 4:
+            vpn_dlls = {"asproxy64.dll", "asproxy.dll", "tapwin32.dll", "tapproxy.dll"}
+            is_vpn = dll_name in vpn_dlls
+            label = "VPN/proxy injection" if is_vpn else "DLL loaded multiple times"
+            indicators.append({
+                "type":   "foreign_dll",
+                "path":   dll_name,
+                "detail": (
+                    f"{label}: {dll_name} is loaded {count} times into the game process. "
+                    f"{'This is a VPN proxy injection that hooks network calls and can cause '
+                    f'stack overflow (0xC00000FD) in the engine networking code. '
+                    f'Disable the VPN or exclude helldivers2.exe from VPN tunneling.' if is_vpn else ''}"
+                ),
+            })
+
     lua_mods = _detect_lua_mods(parsed)
     identified_ldrs = identify_ldrs(parsed, lua_mods)
     identified_mods = identify_installed_mods(parsed)
@@ -5931,6 +6160,7 @@ def detect_mods(parsed: dict) -> dict:
         "unknown_dll": "HIGH",
         "lua_mod":     "HIGH",
         "dll_tamper":  "HIGH",
+        "foreign_dll": "HIGH",
         "appdata_mod": "MED",
     }
     for ind in unique:
@@ -8081,14 +8311,15 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
             sig_id = known_sig.get("id", "SIG-UNKNOWN")
             if status == "resolved":
                 status_icon = "✅"
-                status_text = f"RESOLVED: {fix}" if fix else "RESOLVED"
+                status_text = "RESOLVED"
             else:
                 status_icon = "⚠️"
-                status_text = f"OPEN: {fix}" if fix else "OPEN (no confirmed fix yet)"
+                status_text = "OPEN"
             explanation = (
                 f"{status_icon} Known crash signature: {sig_id}\n"
                 f"Status: {status_text}\n\n"
                 f"Root cause: {title}\n\n"
+                f"Fix: {fix}\n\n"
                 f"Evidence:\n" + "\n".join(f"  • {e}" for e in evidence)
             )
             confidence = "HIGH"
@@ -8102,7 +8333,7 @@ def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
             sig_id = known_sig.get("id", "CUSTOM")
             fix_text = " ".join(fix_steps) if isinstance(fix_steps, list) else str(fix_steps)
             explanation = (
-                f"Known crash pattern: {sig_id}\n"
+                f"Known crash pattern: {sig_id}\n\n"
                 f"{player_msg}\n\n"
                 f"Fix: {fix_text}"
             )
@@ -9012,6 +9243,8 @@ class CrashAnalyzerUI(_BaseWindow):
         self._build_ui()
 
         self._show_drop_zone()
+
+        self.after(2000, self._check_for_updates)
 
         if _DND_AVAILABLE:
             def _on_drop(event):
@@ -9963,6 +10196,13 @@ class CrashAnalyzerUI(_BaseWindow):
 
         if name_l == "rcx":
             if val == 0:
+                if fault_addr == 0x1018:
+                    return note("RCX is NULL - the RefcountedPackageSystem reference map is full. "
+                                "The map returned no slot (null) and the engine attempted to write "
+                                "reference data to [null + 0x1018]. This is a known bug (SIG-HD2-REF-01): "
+                                "the system accumulates references without releasing them, filling the "
+                                "map until it overflows. No user-side fix - try changing loadout or "
+                                "clearing cloud save.")
                 return note("'this' pointer is NULL - a virtual method was called on a null or destroyed C++ object. This is the most common cause of null-deref crashes in game engines.")
             elif val < 0x1000:
                 return note(f"'this' pointer is near-null (0x{val:X}) - possibly a corrupted or partially-initialized object pointer.")
@@ -10766,6 +11006,78 @@ class CrashAnalyzerUI(_BaseWindow):
 
     def _hide_drop_zone(self):
         self._drop_zone.place_forget()
+
+    def _check_for_updates(self):
+        import urllib.request, ssl, json as _json, threading, webbrowser
+        def _check():
+            try:
+                url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
+                req = urllib.request.Request(url, headers={"User-Agent": "StingrayCrashAnalyzer"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = _json.loads(resp.read().decode())
+                latest = data.get("tag_name", "").lstrip("v")
+                current = _CURRENT_VERSION.lstrip("v")
+                if not latest or latest == current:
+                    return
+                if _UPDATES_DISABLED:
+                    return
+                if latest == _IGNORED_VERSION.lstrip("v"):
+                    return
+                release_url = data.get("html_url", "")
+                self.after(0, lambda: self._show_update_dialog(latest, release_url))
+            except Exception:
+                pass
+        threading.Thread(target=_check, daemon=True).start()
+
+    def _show_update_dialog(self, latest_version, release_url):
+        dialog = tk.Toplevel(self)
+        dialog.title("Update Available")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+        dialog.attributes("-topmost", True)
+        dialog.configure(bg=BG)
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - 200
+        y = self.winfo_y() + (self.winfo_height() // 2) - 105
+        dialog.geometry(f"400x210+{x}+{y}")
+        tk.Label(dialog, text="Update Available",
+                 font=(UI_FONT, 12, "bold"), bg=BG, fg=ACCENT).pack(pady=(18, 4))
+        tk.Label(dialog, text=f"Current: v{_CURRENT_VERSION}   ->   Latest: v{latest_version}",
+                 font=(UI_FONT, 10), bg=BG, fg=TEXT).pack(pady=(0, 14))
+        btn_f = tk.Frame(dialog, bg=BG)
+        btn_f.pack(pady=4)
+        def _open():
+            import webbrowser
+            webbrowser.open(release_url)
+            dialog.destroy()
+        def _ignore():
+            global _IGNORED_VERSION
+            _IGNORED_VERSION = latest_version
+            _save_settings()
+            dialog.destroy()
+        def _disable():
+            global _UPDATES_DISABLED
+            _UPDATES_DISABLED = True
+            _save_settings()
+            dialog.destroy()
+        ttk.Button(btn_f, text="View Release Page", command=_open).grid(row=0, column=0, padx=6, pady=4, sticky='ew')
+        ttk.Button(btn_f, text=f"Ignore v{latest_version}", command=_ignore).grid(row=0, column=1, padx=6, pady=4, sticky='ew')
+        ttk.Button(btn_f, text="Never Notify Me", command=_disable).grid(row=1, column=0, columnspan=2, padx=6, pady=2, sticky='ew')
+        tk.Label(dialog,
+                 text='"Ignore" skips this version only. "Never Notify" disables all future checks.',
+                 font=(UI_FONT, 8), bg=BG, fg=TEXT_DIM).pack(pady=(8, 0))
+
+    def _open_url(self, url):
+        import webbrowser
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _dismiss_update(self):
+        if hasattr(self, "_update_banner"):
+            self._update_banner.destroy()
+            delattr(self, "_update_banner")
 
     def _open_file(self):
         path = filedialog.askopenfilename(

@@ -283,17 +283,31 @@
     "signatures": [
       {
         "id": "SIG-HD2-SSR-01",
-        "title": "Helldivers 2 Stingray Setup Recursion (build 19411)",
+        "title": "Helldivers 2 Stingray Setup Recursion",
         "status": "resolved",
-        "fix": "Clean reinstall of the game.",
-        "match_criteria": "0xC0000005 READ at 0xFFFFFFFFFFFFFFFF, helldivers2.exe+0x79A553, recursion at +0x17001D0 (x3+)"
+        "fix": "RCX=0 (or RAX=0): clean reinstall. RCX not null: clear shader cache and delete user_settings.config.",
+        "match_criteria": "0xC0000005 in helldivers2.exe, +0x170xxxx recursion region (>=2 frames). RCX=0 → reinstall, RCX≠0 → shader cache."
       },
       {
         "id": "SIG-HD2-VTC-01",
         "title": "Helldivers 2 vtable corruption to KUSER_SHARED_DATA execute-violation",
         "status": "open",
         "fix": "No confirmed fix. Report to Arrowhead with dump + engine log.",
-        "match_criteria": "0xC0000005 EXECUTE at 0x7FFE0000-0x7FFE1000, R13=0, stack smashed (<=4 frames)"
+        "match_criteria": "0xC0000005 EXECUTE at 0x7FFE0000-0x7FFE1000, R13=0, stack smashed"
+      },
+      {
+        "id": "SIG-HD2-REF-01",
+        "title": "Helldivers 2 RefcountedPackageSystem reference map overflow",
+        "status": "open",
+        "fix": "No user-side fix. Try changing loadout or clearing cloud save. Report to Arrowhead.",
+        "match_criteria": "0xC0000005 WRITE at 0x1018, helldivers2.exe+0x6AC699, RCX=0, RAX=0x58"
+      },
+      {
+        "id": "SIG-HD2-SCS-01",
+        "title": "Helldivers 2 shader/settings corruption triggering engine init recursion",
+        "status": "resolved",
+        "fix": "Clear shader cache and delete user_settings.config. (Now handled by SSR-01 via RCX check - SCS-01 catches low-sentinel cases that SSR-01 misses.)",
+        "match_criteria": "0xC0000005 in helldivers2.exe, +0x170xxxx recursion (<3 sentinels, distinguishes from SSR-01)"
       }
     ]
   },
