@@ -46,7 +46,7 @@ def resource_path(*parts: str) -> Path:
 _SETTINGS_DIR  = Path.home() / ".stingray_crash_analyzer"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
-_CURRENT_VERSION = "2.1.0"
+_CURRENT_VERSION = "2.1.1"
 _GITHUB_REPO = "ERRORX2/Styngray-crash-analyzer"
 _IGNORED_VERSION = ""
 _UPDATES_DISABLED = False
@@ -338,6 +338,39 @@ def lookup_resource_id(resource_id: int) -> "str | None":
     return STINGRAY_RESOURCE_ID_LOOKUP.get(resource_id)
 
 
+HD2_WEAPON_NAMES: dict = {
+    0x3D721B3B: "Arc Grenade (throwable)",
+    0xA6C20EAC: "Grenade Pistol (sidearm)",
+    0x727694FF: "Counter Sniper (primary)",
+    0x371B35AD: "Primary weapon (8/30 missions)",
+    0x4EBE8680: "Primary weapon (6/30 missions)",
+    0x61B88E61: "Primary weapon (2/30 missions)",
+    0xE288C742: "Primary weapon (2/30 missions)",
+    0x335B8A1A: "Sidearm (3/30 missions)",
+    0xC3E50BB9: "Sidearm (1/30 missions)",
+}
+
+HD2_PACKAGE_NAMES: dict = {
+    0xFE88D9B08F6FE80: "Ship state package (REF-01 trigger)",
+}
+
+# 32-bit weapon hash → 64-bit package hashes (from "Shared weapon Loaded" → "Requesting package")
+HD2_WEAPON_PACKAGES: dict = {
+    0x3D721B3B: [0xDDCEA5FDD4071767],  # Arc Grenade
+    0xA6C20EAC: [0xB29A2FA06FDD99D2, 0xFE0FBE8486D53767],  # Grenade Pistol
+    0x727694FF: [0x0E6452D74D3A9DD3, 0x8475F912FB83A589, 0x981A0BF27DD6A546,
+                 0xAD393286210EEF73, 0xC5DE422EED100414, 0xD1968909EA085527],  # Counter Sniper
+}
+
+
+def lookup_hd2_weapon(weapon_hash: int) -> "str | None":
+    return HD2_WEAPON_NAMES.get(weapon_hash)
+
+
+def lookup_hd2_package(package_hash: int) -> "str | None":
+    return HD2_PACKAGE_NAMES.get(package_hash)
+
+
 DXGI_REMOVAL_REASONS = {
     "0x887A0005": ("DXGI_ERROR_DEVICE_REMOVED",
                    "The GPU device was physically removed or powered off, or a driver upgrade "
@@ -481,7 +514,7 @@ D3D12_HANG_RISK = {
 }
 
 EXCEPTION_CODES = {
-    0xC0000005: "⚠ STINGRAY ENGINE SUICIDE (false flag) – Engine detected an internal error and intentionally terminated. This is NOT the root cause - To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs",
+    0xC0000005: "ACCESS_VIOLATION – The CPU was denied access to a memory address (read, write, or execute). Check the Crash Signature Match section for the specific root cause. If no signature matched, this may be a Stingray engine false-flag suicide - run with --log-to-file for engine logs.",
     0xC000001D: "ILLEGAL_INSTRUCTION – CPU executed an invalid instruction",
     0xC0000034: "OBJECT_NAME_NOT_FOUND – Named object not found",
     0xC000008C: "ARRAY_BOUNDS_EXCEEDED – Array index out of bounds",
@@ -2118,6 +2151,15 @@ def _detect_recursion(parsed: dict) -> str:
                 pass
         return None, 0
 
+    def _is_likely_executable_code(mod_name, offset):
+        if offset < 0x1000:
+            return False
+        mod_lower = mod_name.lower() if mod_name else ""
+        # preloader.dll .entry section: 0xB000-0xB048 (ud2 fast-fail stubs)
+        if mod_lower == "preloader.dll" and 0xB000 <= offset < 0xB050:
+            return False
+        return True
+
     addr_counts: dict = {}
     ptr = crash_rsp
     for _ in range(1024):
@@ -2125,7 +2167,7 @@ def _detect_recursion(parsed: dict) -> str:
         if val is None:
             break
         mod, off = addr_to_mod(val)
-        if mod and off > 0:
+        if mod and off > 0 and _is_likely_executable_code(mod, off):
             key = (mod, off)
             addr_counts[key] = addr_counts.get(key, 0) + 1
         ptr += 8
@@ -2759,9 +2801,14 @@ def quick_patterns(parsed: dict) -> list[tuple[str, str, str, str]]:
                 pass
         if code_int == 0xC0000005:
             hints.insert(0, (
-                "⚠ ENGINE SUICIDE - FALSE FLAG",
-                "0xC0000005: Stingray intentionally killed itself after detecting an internal error. "
-                "This exception is NOT the root cause. To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs.",
+                "Access Violation (0xC0000005)",
+                "The CPU was denied access to a memory address (read, write, or execute). "
+                "This is the most common crash type. Check the Crash Signature Match section - "
+                "if a signature matched, that IS the root cause. If no signature matched, this "
+                "may be a Stingray engine 'false flag' suicide (the engine caught an internal "
+                "error and deliberately crashed). To get engine logs: right-click the game in "
+                "Steam > Properties > Launch Options, add --log-to-file, then launch and play "
+                "until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs.",
                 YELLOW,
                 "To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs "
                 "Common triggers: failed resource load, violated engine assertion, out-of-memory, or corrupted game state.",
@@ -3893,7 +3940,7 @@ def _sig_fault_mod_and_offset(parsed: dict):
 
 
 def _match_sig_hd2_ssr_01(parsed: dict):
-    """SIG-HD2-SSR-01: Helldivers 2 Stingray Setup Recursion (build 19411).
+    """SIG-HD2-SSR-01: Helldivers 2 Stingray Setup Recursion.
 
     Root cause: unbounded recursion through the +0x170xxxx code region of
     helldivers2.exe. The recursion overflows the call stack, smashing return
@@ -3903,10 +3950,7 @@ def _match_sig_hd2_ssr_01(parsed: dict):
     0xC0000005.
 
     Confirmed on multiple machines with different crash offsets, faulting
-    addresses, and specific recursion hubs within the +0x170xxxx region:
-    - DESKTOP-9RQIU4F: recursion at +0x17001D0 (x7), crash at +0x79A553
-    - Nukichu: recursion at +0x1735468 (x6), +0x172E258 (x5), +0x172B048 (x5),
-      crash at +0x13890E5
+    addresses, and specific recursion hubs within the +0x170xxxx region.
     All share the same +0x170xxxx recursion region and 0xFFFFFFFF stack-smash
     sentinel pattern.
 
@@ -3927,6 +3971,16 @@ def _match_sig_hd2_ssr_01(parsed: dict):
         return False, []
     fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
     if fault_mod != "helldivers2.exe":
+        return False, []
+    # Exclude crashes at known specific crash sites that have their own signatures.
+    # +0x9F60ED is SIG-HD2-AVND-01 (audio voice null-deref).
+    # +0x6AC699 is SIG-HD2-REF-01 (RefcountedPackageSystem reference map overflow).
+    # In both cases, the +0x170xxxx frames on the call chain are just the engine's
+    # init code on the call path, not genuine recursion. Without this exclusion,
+    # SSR-01 false-positives on every AVND-01 and REF-01 crash because the init
+    # dispatcher happens to be in the +0x170xxxx region and appears 2-3x in the
+    # call chain.
+    if fault_off in (0x9F60ED, 0x6AC699):
         return False, []
     try:
         chain = _reconstruct_call_chain(parsed)
@@ -3993,11 +4047,18 @@ _register_signature(
 
 
 def _match_sig_hd2_vtc_01(parsed: dict):
-    """SIG-HD2-VTC-01: Helldivers 2 vtable corruption -> KUSER_SHARED_DATA execute.
+    """SIG-HD2-VTC-01: EXECUTE at KUSER_SHARED_DATA range (R13=0, stack smashed).
 
-    Root cause: corrupted function pointer / vtable slot redirected the CPU into
-    the KUSER_SHARED_DATA page (0x7FFE0000), which is non-executable. Likely a
-    use-after-free on a callable object. R13=0 at crash (null 'this').
+    Observable: 0xC0000005 EXECUTE at 0x7FFE0000-0x7FFE1000 (KUSER_SHARED_DATA
+    page, non-executable). R13=0 at crash. Stack smashed (<=4 recoverable frames).
+
+    MECHANISM (HYPOTHESIS, unconfirmed): a corrupted indirect call target
+    (vtable slot or function pointer) redirected the CPU into KUSER_SHARED_DATA.
+    The specific source of corruption has not been identified. Possible causes
+    include use-after-free on a callable object, heap corruption overwriting a
+    callable slot, or packer-level anti-tamper cascading. R13=0 suggests a null
+    'this' pointer was involved.
+
     Fix: none confirmed. Report to Arrowhead with dump + engine log.
     """
     ex = parsed.get("exception")
@@ -4033,21 +4094,23 @@ def _match_sig_hd2_vtc_01(parsed: dict):
         return False, []
     evidence = [
         "exception 0xC0000005 (EXECUTE)",
-        "faulting address 0x%X in KUSER_SHARED_DATA" % int(params[1], 16),
-        "R13 = 0 at crash (null 'this' pointer)",
+        "faulting address 0x%X in KUSER_SHARED_DATA (non-executable page)" % int(params[1], 16),
+        "R13 = 0 at crash (null register - may indicate null 'this' pointer)",
         "stack smashed (%d recoverable frame(s))" % len(chain),
-        "corrupted function pointer / vtable slot (use-after-free suspected)",
+        "MECHANISM (hypothesis, unconfirmed): corrupted indirect call target redirected RIP to KUSER_SHARED_DATA",
     ]
     return True, evidence
 
 _register_signature(
     "SIG-HD2-VTC-01",
-    "Helldivers 2 vtable corruption to KUSER_SHARED_DATA execute-violation",
+    "Helldivers 2 EXECUTE at KUSER_SHARED_DATA range (R13=0, stack smashed)",
     "open",
-    "No confirmed fix. Likely a use-after-free on a callable object; the vtable "
-    "slot got overwritten with a KUSER_SHARED_DATA-adjacent address. Report to "
-    "Arrowhead with dump + build identifier. Engine log (--log-to-file) needed to "
-    "identify what the engine was doing when the corruption occurred.",
+    "No confirmed fix. The CPU was redirected to the KUSER_SHARED_DATA page "
+    "(non-executable). The source of the corruption has not been identified - "
+    "possible causes include use-after-free, heap corruption, or packer-level "
+    "anti-tamper cascading. Report to Arrowhead with dump + build identifier. "
+    "Engine log (--log-to-file) needed to identify what the engine was doing "
+    "when the corruption occurred.",
     _match_sig_hd2_vtc_01,
 )
 
@@ -4062,6 +4125,13 @@ def _match_sig_hd2_ref_01(parsed: dict):
     Engine log comparison: 23 requests / 0 releases on crashing machine vs
     26 requests / 17 releases on non-crashing machine. Package 0FE88D9B08F6FE80
     reaches ref_count=3 on crashing, 1 on non-crashing.
+
+    VERIFIED via engine log analysis (Task 23): package 0xFE88D9B08F6FE80 loads
+    at StateShip Setup (right after "on game state change, Enter: Ship"). It is
+    a Ship state package, not a weapon or stratagem package. This explains the
+    "~53 seconds after entering Ship state" trigger - the package is requested
+    when the Ship state loads, and if the reference map is already full from
+    accumulated leaks, the request returns null.
 
     Crash: WRITE to 0x1018 at helldivers2.exe +0x6AC699, RCX=0, RAX=0x58.
     Trigger: ~53 seconds after entering Ship state, standing still.
@@ -4123,9 +4193,8 @@ def _match_sig_hd2_scs_01(parsed: dict):
     sentinels (0 sentinels vs 3+ for SSR-01). The corruption is lighter --
     shader cache or user_settings.config is corrupted, not the package data.
 
-    Fix: clear shader cache and delete user_settings.config.
-    Confirmed on FS-1041: solved by clearing shader cache + deleting
-    user_settings.config.
+    Fix: clear shader cache and delete user_settings.config. Confirmed solved
+    by clearing shader cache + deleting user_settings.config in known cases.
     """
     ex = parsed.get("exception")
     if not ex:
@@ -4145,6 +4214,10 @@ def _match_sig_hd2_scs_01(parsed: dict):
         return False, []
     fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
     if fault_mod != "helldivers2.exe":
+        return False, []
+    # Exclude crashes at known specific crash sites (same as SSR-01).
+    # +0x9F60ED is AVND-01, +0x6AC699 is REF-01.
+    if fault_off in (0x9F60ED, 0x6AC699):
         return False, []
     try:
         chain = _reconstruct_call_chain(parsed)
@@ -4187,6 +4260,76 @@ _register_signature(
     "Same +0x170xxxx recursion as SSR-01 but without stack-smash sentinels, "
     "indicating lighter corruption (shader/settings vs package data).",
     _match_sig_hd2_scs_01,
+)
+
+
+def _match_sig_hd2_avnd_01(parsed: dict):
+    """SIG-HD2-AVND-01: Audio voice null-deref during voice list iteration.
+
+    The game iterates through a list of Wwise audio voice/emitter objects and
+    calls a virtual method on each. One voice object is null - it was never
+    initialized or was freed when an audio endpoint disappeared.
+
+    Triggered by audio device changes during gameplay. Virtual audio devices
+    (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create
+    endpoints that Wwise fails to fully initialize. When the virtual device
+    disconnects or changes state, the voice becomes null but stays in the
+    iteration list.
+
+    Confirmed on multiple machines with different RCX values (voice list
+    indices) -- the index varies by which virtual device caused the null.
+
+    Fix: Remove all virtual audio devices. Set default audio output to a
+    single stable device (wired speakers or headphones, not Bluetooth).
+    Disable unused audio endpoints in Windows Sound settings.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) != 0x0:  # READ
+            return False, []
+        if int(params[1], 16) != 0x58:  # null + 88 = field offset
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
+    if fault_mod != "helldivers2.exe" or fault_off != 0x9F60ED:
+        return False, []
+    regs = ex.get("regs", {})
+    if regs.get("rax") != 0:
+        return False, []
+    # RCX is the voice list index - varies by which virtual device caused the null.
+    # Do NOT require a specific rcx value - any non-zero rcx with the above
+    # fingerprint is this bug.
+    rcx = regs.get("rcx", 0)
+    evidence = [
+        "exception 0xC0000005 (READ) at 0x58 (null + 88 = struct field offset)",
+        "crash at helldivers2.exe +0x9F60ED (audio voice iteration loop)",
+        "RAX = 0 (null voice/emitter object pointer)",
+        "RCX = 0x%X (voice list index %d)" % (rcx, rcx),
+        "Wwise audio voice null-deref (virtual audio device suspected)",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-AVND-01",
+    "Helldivers 2 Audio voice null-deref during voice list iteration",
+    "open",
+    "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, "
+    "VirtualBox audio). Set the default audio output to a single stable device "
+    "(wired speakers or headphones, not Bluetooth). Disable unused audio endpoints "
+    "in Windows Sound settings. If the crash persists, report to Arrowhead with "
+    "the dump and the RCX value (voice list index).",
+    _match_sig_hd2_avnd_01,
 )
 
 
@@ -4477,13 +4620,28 @@ def build_summary(parsed: dict) -> str:
     if ex_early:
         try:
             if int(ex_early["code"], 16) == 0xC0000005:
-                lines.append("╔═════════════════════════════════════════════════════╗")
-                lines.append("║         FALSE FLAG - ENGINE SUICIDE                 ║")
-                lines.append("║  0xC0000005: Stingray killed itself intentionally.  ║")
-                lines.append("║  This is NOT the root cause of the crash.           ║")
-                lines.append("║  To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs instead.    ║")
-                lines.append("╚═════════════════════════════════════════════════════╝")
-                lines.append("")
+                # Only show the FALSE FLAG banner if the suicide check confirms it
+                # is a Stingray engine suicide AND no signature matched.
+                # "No signature matched" alone does NOT mean suicide - it just means
+                # we don't have a signature for this crash type. Many genuine crashes
+                # (UAF, bad pointer, etc.) have no signature yet.
+                _suicide_check = _is_stingray_suicide(parsed)
+                _is_suicide = isinstance(_suicide_check, tuple) and _suicide_check[0]
+                if _is_suicide:
+                    _matched_sigs = match_signatures(parsed)
+                    _matched_json = []
+                    try:
+                        _matched_json = _match_all_custom_patterns(parsed, None, {})
+                    except Exception:
+                        pass
+                    if not _matched_sigs and not _matched_json:
+                        lines.append("╔═════════════════════════════════════════════════════╗")
+                        lines.append("║         FALSE FLAG - ENGINE SUICIDE                 ║")
+                        lines.append("║  0xC0000005: Stingray killed itself intentionally.  ║")
+                        lines.append("║  This is NOT the root cause of the crash.           ║")
+                        lines.append("║  To get engine logs: right-click the game in Steam > Properties > Launch Options, add --log-to-file, then launch and play until it crashes. The log will be in %APPDATA%\\Arrowhead\\Helldivers 2\\logs instead.    ║")
+                        lines.append("╚═════════════════════════════════════════════════════╝")
+                        lines.append("")
         except Exception:
             pass
 
@@ -4822,15 +4980,12 @@ def check_known_crash_patterns(parsed: dict, decoded_instr: dict = None, rootcau
         rcx = regs.get("rcx", 0)
         rbx = regs.get("rbx", 0)
 
-        if crash_off == 0x9F60ED and rax == 0 and rcx == 0x15 and rbx == 0x800:
-            results.append({
-                "id": "AUDIO_VOICE_NULL_DEREF",
-                "description": "Audio voice null-deref during voice list iteration",
-                "cause": "The game iterates through a list of Wwise audio voice/emitter objects and calls a virtual method on each. One voice object (at index 21 / 0x15) is null - it was never initialized or was freed when an audio endpoint disappeared.",
-                "trigger": "Triggered by audio device changes during gameplay. Virtual audio devices (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create endpoints that Wwise fails to fully initialize. When the virtual device disconnects or changes state, the voice becomes null but stays in the iteration list.",
-                "fix": "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, VirtualBox audio). Set the default audio output to a single stable device (wired speakers or headphones, not Bluetooth). Disable unused audio endpoints in Windows Sound settings.",
-                "confidence": "HIGH",
-            })
+        # Note: AUDIO_VOICE_NULL_DEREF (crash_off == 0x9F60ED) is now handled by
+        # the code-level signature SIG-HD2-AVND-01 (registered via _register_signature),
+        # which shows in the summary/verdict block AND the "CRASH SIGNATURE MATCH" section.
+        # The old hardcoded pattern only showed in the Root Cause tab and required
+        # rcx==0x15 (missing THEIA #4's rcx==0x21 case). The code sig is broader
+        # (any rcx) and more visible. No duplicate hardcoded entry here.
 
         if crash_off == 0x6AC699 and rax == 0x58 and rcx == 0 and fault_addr == 0x1018:
             results.append({

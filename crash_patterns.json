@@ -202,20 +202,19 @@
     },
     {
       "id": "SIG-HD2-PEHDR-01",
-      "name": "Helldivers 2 Execute PE header (corrupted function pointer to module base)",
-      "player_message": "A corrupted function pointer pointed at the very start of a DLL (the PE file header, which is data, not code), and the CPU tried to execute it. This is an engine bug: a vtable or indirect call target got overwritten with a module's base address.",
+      "name": "Helldivers 2 Execute PE header (RIP redirected to a module's base +0x0)",
+      "player_message": "The CPU was redirected to the very start of a DLL (the PE file header, which is data, not executable code) and tried to execute it. The CPU then faulted because PE header pages are read-only and non-executable. The most likely cause is a corrupted indirect call target (a vtable slot or function pointer holding a module's base address), but the exact source of the corruption has not yet been confirmed.",
       "fix": [
         "This is an engine bug: no user-side fix is confirmed.",
         "Capture the engine log (--log-to-file) and report to Arrowhead with the dump.",
-        "Include: EXECUTE-violation at a module's base address (+0x0), RBP=0, build identifier."
+        "Include in the report: EXECUTE-violation at a module's base address (+0x0), the module name (runtime.dll in all known cases), and the build identifier."
       ],
-      "dev_note": "SIG-HD2-PEHDR-01 (open): 0xC0000005 EXECUTE at a loaded module's base address (offset +0x0 = PE header). The CPU was redirected to the MZ/PE header bytes and tried to execute them. RBP=0 (null frame pointer: stack frame corrupted). Recursion between runtime.dll and EOSSDK-Win64-Shipping.dll may be involved. Build: 42899.41204.",
+      "dev_note": "SIG-HD2-PEHDR-01 (open): 0xC0000005 EXECUTE (param[0]=0x8) at a loaded module's base address (offset +0x0 = PE header). The CPU was redirected to the MZ/PE header bytes (read-only data) and faulted on NX. Cross-case fingerprint = {0xC0000005, EXECUTE, crash_offset=0x0, module=runtime.dll}. MECHANISM (HYPOTHESIS, unconfirmed): corrupted indirect call target (vtable slot or function pointer) holding a module base address. The RDX=0xE0670103 observation in one case (the CRT exception code for STATUS_HEAP_CORRUPTION) supports heap corruption as the upstream cause but does not prove it. runtime.dll STATIC ANALYSIS: the DLL is 64 MB, Authenticode-signed by Arrowhead Game Studios AB (genuine/untampered), and HEAVILY PACKED (custom packer: 12 sections including .rwx (RWX), no .text section, ~50 MB of virtualized code; no VMProtect/Themida/Enigma/UPX string signatures). Export directory is EMPTY (no exports). RVA +0x0 is just the MZ/PE header -- NOT a deliberate crash stub. EXCLUDED HYPOTHESIS: 'runtime.dll +0x0 is a deliberate self-trap analogous to preloader.dll+0xB010' is REJECTED -- no trap section at +0x0, no export pointing at +0x0, AddressOfEntryPoint is elsewhere, bytes at +0x0 are just MZ header data. The packer does have anti-tamper timing checks (KUSER_SHARED_DATA TickCount) and obfuscated control flow, but none redirect execution to +0x0. STRENGTHENED CONCLUSION: the self-trap-at-+0x0 hypothesis is rejected; upstream heap corruption remains the most plausible explanation. Build: 42899.41204.",
       "confidence": "HIGH",
       "match": {
         "ex_code": "0xC0000005",
         "ex_param_0": "0x8",
-        "crash_offset": "0x0",
-        "null_register": "RBP"
+        "crash_offset": "0x0"
       },
       "enabled": true
     },
@@ -228,7 +227,7 @@
         "Note what you were doing when it crashed (loading a mission, opening a menu, joining a squad, etc.).",
         "Capture the engine log (--log-to-file) for more context on what the engine was doing."
       ],
-      "dev_note": "SIG-HD2-NPD-01 (open): 0xC0000005 READ at a near-null address (typically 0x58 = field offset +88). The null object pointer was in RAX. The faulting instruction did [RAX+offset]. This is the most common crash type in C++ engines: a null 'this' pointer or unchecked function return. Build: 42899.41204.",
+      "dev_note": "SIG-HD2-NPD-01 (open): 0xC0000005 READ at a near-null address (typically 0x58 = field offset +88). The null object pointer was in RAX. The faulting instruction did [RAX+offset]. This is the most common crash type in C++ engines: a null 'this' pointer or unchecked function return. Note: if the crash offset is +0x9F60ED, the code-level signature SIG-HD2-AVND-01 (audio voice null-deref) takes precedence and provides a specific fix (remove virtual audio devices). Build: 42899.41204.",
       "confidence": "HIGH",
       "match": {
         "ex_code": "0xC0000005",
@@ -276,6 +275,27 @@
         "crash_offset": "0x537C92"
       },
       "enabled": true
+    },
+    {
+      "id": "SIG-HD2-UAF02-01",
+      "name": "Helldivers 2 Use-after-free in GPU/rendering path (helldivers2.exe +0xD96DDC)",
+      "player_message": "The game crashed because it tried to read through a pointer to memory that had already been freed. This is a use-after-free bug in the game's rendering or GPU-related code. The pointer was valid at some point but the object it pointed to was freed or moved, and the game didn't clear the pointer before using it again.",
+      "fix": [
+        "This is a game bug: no user-side fix is confirmed.",
+        "Update your GPU drivers to the latest version (a driver bug may contribute to the timing that triggers this).",
+        "Try lowering graphics settings or disabling features like FSR/frame generation to reduce GPU-driver interaction complexity.",
+        "Capture the engine log (--log-to-file) and report to Arrowhead with the dump.",
+        "Include in the report: crash offset +0xD96DDC, the faulting heap address, the GPU model, and the driver version."
+      ],
+      "dev_note": "SIG-HD2-UAF02-01 (open): 0xC0000005 READ at a heap address (large, not near-null) in helldivers2.exe +0xD96DDC. The faulting address is in the heap region but NOT in any captured memory range, indicating the memory was freed before the read. RAX holds a heap pointer (also freed/invalid at crash time). Call chain includes GPU driver callback (nvwgf2umx.dll on stack in one case) and runtime.dll +0x4D0000 (the known stack-smash sentinel). This is a use-after-free in the game's GPU/rendering path. Build: 42899.41204.",
+      "confidence": "HIGH",
+      "match": {
+        "ex_code": "0xC0000005",
+        "ex_param_0": "0x0",
+        "crash_offset": "0xD96DDC",
+        "crash_mod_contains": "helldivers2.exe"
+      },
+      "enabled": true
     }
   ],
   "_code_signatures": {
@@ -290,9 +310,9 @@
       },
       {
         "id": "SIG-HD2-VTC-01",
-        "title": "Helldivers 2 vtable corruption to KUSER_SHARED_DATA execute-violation",
+        "title": "Helldivers 2 EXECUTE at KUSER_SHARED_DATA range (R13=0, stack smashed)",
         "status": "open",
-        "fix": "No confirmed fix. Report to Arrowhead with dump + engine log.",
+        "fix": "No confirmed fix. Report to Arrowhead with dump + engine log. Source of corruption not yet identified (hypothesis: corrupted indirect call target).",
         "match_criteria": "0xC0000005 EXECUTE at 0x7FFE0000-0x7FFE1000, R13=0, stack smashed"
       },
       {
@@ -308,6 +328,13 @@
         "status": "resolved",
         "fix": "Clear shader cache and delete user_settings.config. (Now handled by SSR-01 via RCX check - SCS-01 catches low-sentinel cases that SSR-01 misses.)",
         "match_criteria": "0xC0000005 in helldivers2.exe, +0x170xxxx recursion (<3 sentinels, distinguishes from SSR-01)"
+      },
+      {
+        "id": "SIG-HD2-AVND-01",
+        "title": "Helldivers 2 Audio voice null-deref during voice list iteration",
+        "status": "open",
+        "fix": "Remove all virtual audio devices (VB-Cable, VoiceMeeter, Meta Quest link, VirtualBox audio). Set default audio output to a single stable device (wired speakers or headphones, not Bluetooth). Disable unused audio endpoints in Windows Sound settings.",
+        "match_criteria": "0xC0000005 READ at 0x58, helldivers2.exe+0x9F60ED, RAX=0. RCX varies (voice list index, e.g. 0x15 or 0x21)."
       }
     ]
   },
