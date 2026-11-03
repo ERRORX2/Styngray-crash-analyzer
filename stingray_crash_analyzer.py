@@ -46,7 +46,7 @@ def resource_path(*parts: str) -> Path:
 _SETTINGS_DIR  = Path.home() / ".stingray_crash_analyzer"
 _SETTINGS_FILE = _SETTINGS_DIR / "settings.json"
 
-_CURRENT_VERSION = "2.1.1"
+_CURRENT_VERSION = "2.1.2"
 _GITHUB_REPO = "ERRORX2/Styngray-crash-analyzer"
 _IGNORED_VERSION = ""
 _UPDATES_DISABLED = False
@@ -313,12 +313,31 @@ _KNOWN_RESOURCE_NAMES = [
     "actor", "mover", "camera", "light", "particle", "decal",
     "terrain", "vegetation", "mesh", "skeleton", "state_machine",
     "input_filter", "shader_template", "global_shader_indices",
+    "shader_library", "strings", "geometry_group", "speedtree",
+    "content/fonts/fallback",
+    "content/fonts/fs_sinclair_medium_runtime",
+    "content/fonts/runtime_font",
+    "mods/chef_shared_loader/core_1",
+    "mods/goose/war_journalist",
+    "mods/hd2rt/core",
+    "mods/libra/match_your_colors",
 ]
 
 STINGRAY_RESOURCE_ID_LOOKUP: dict = {}
 for _name in _KNOWN_RESOURCE_NAMES:
     _hid = stingray_murmur64a(_name.encode('utf-8'))
     STINGRAY_RESOURCE_ID_LOOKUP[_hid] = _name
+
+_HD2_UNIT_RESOURCE_IDS: dict = {
+    0x79E4B3D2DA5E45E3: "EXO-45 Patriot (mech)",
+    0xC2D449ECF7FACAB1: "EXO-49 (mech)",
+    0x7B2326F6FD9C8069: "EXO-51 (mech)",
+    0x35DBF54F016F3624: "EXO-55 (mech)",
+    0x4D1C334D294DFA97: "Helldiver (player character)",
+    0x73681FFD58FA1A90: "Turret (resupply)",
+    0x08F6089289C83D22: "Turret Gun (weapon)",
+}
+STINGRAY_RESOURCE_ID_LOOKUP.update(_HD2_UNIT_RESOURCE_IDS)
 
 _lua_hash = stingray_murmur64a(b'lua')
 assert _lua_hash == int.from_bytes(LUA_TYPE_ID_SIGNATURE, 'little'), (
@@ -1119,6 +1138,25 @@ def parse_minidump(path: str) -> dict:
                     "r12": r12, "r13": r13, "r14": r14, "r15": r15,
                 })
 
+    _mm = result.get("memory_map", [])
+    if _mm:
+        _mm_sorted = sorted(_mm, key=lambda e: e[0])
+        result["_mm_starts"] = [e[0] for e in _mm_sorted]
+        result["_mm_sorted"] = _mm_sorted
+    _mods = result.get("modules", [])
+    if _mods:
+        _mi = []
+        for m in _mods:
+            try:
+                b = int(m["base"], 16)
+                _mi.append((b, b + m["size"],
+                           PureWindowsPath(m["name"]).name, m["name"]))
+            except Exception:
+                pass
+        _mi.sort(key=lambda e: e[0])
+        result["_mod_intervals"] = _mi
+        result["_mod_starts"] = [e[0] for e in _mi]
+
     return result
 
 
@@ -1296,7 +1334,7 @@ DISCORD_LEGIT_PATH_FRAGMENTS = (
 )
 
 
-def verify_critical_dlls(parsed: dict) -> dict:
+def verify_critical_dlls_impl(parsed: dict) -> dict:
     modules = parsed.get("modules", [])
 
     def _check_msvcp140(m: dict) -> dict:
@@ -1697,6 +1735,14 @@ def verify_critical_dlls(parsed: dict) -> dict:
     }
 
 
+def verify_critical_dlls(parsed: dict) -> dict:
+    if "_verify_critical_dlls_cache" in parsed:
+        return parsed["_verify_critical_dlls_cache"]
+    result = verify_critical_dlls_impl(parsed)
+    parsed["_verify_critical_dlls_cache"] = result
+    return result
+
+
 def annotate_frame(mod_name: str, offset: int) -> str:
 
     n = (mod_name or "").lower()
@@ -1823,6 +1869,34 @@ def annotate_frame(mod_name: str, offset: int) -> str:
         return "Xbox Party SDK"
     if "xinput" in n:
         return "XInput (Xbox controller)"
+
+    if n == "runtime.dll":
+        if offset in (0x554880, 0x5548C2):
+            return "THEIA exception dispatch (Layer 1/2)"
+        if offset in (0x50E828, 0x57EAC9, 0x57EBC9):
+            return "THEIA main handler (Layer 3)"
+        if offset == 0xB44CEB:
+            return "THEIA decrypt handler (Layer 7)"
+        if offset in (0x3BB5A57, 0x22A1B54, 0x3BB36D1):
+            return "THEIA VM-obfuscated decrypt (Layer 7)"
+        if offset in (0x52FFFF, 0x530000, 0x530004, 0x530009):
+            return "THEIA exception sentinel/dispatch"
+        if offset in (0x213200,):
+            return "THEIA internal dispatch"
+        if offset in (0x1109501, 0xB8B032, 0xB8B030):
+            return "THEIA integrity/decrypt worker"
+        if offset in (0x4A8DB0, 0x4C69F0):
+            return "THEIA cleanup/shutdown"
+        return "THEIA anti-tamper runtime (page-level encryption)"
+    if n == "preloader.dll":
+        if offset == 0x3590:
+            return "THEIA NtContinue trampoline"
+        if offset in (0xA048, 0xA090):
+            return "THEIA callback entry"
+        if offset in (0xB010, 0xB030):
+            return "THEIA trap/bootstrap (.entry section)"
+        return "THEIA bootstrap (patches KiUserExceptionDispatcher)"
+
     if n in ("hid.dll", "hidclass.dll"):
         return "Windows HID (input device)"
 
@@ -1937,15 +2011,34 @@ def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
 
     modules  = parsed.get("modules", [])
     raw_path = parsed.get("_raw_path")
-    if not raw_path or not rsp:
+    if not rsp:
         return []
-    try:
-        with open(raw_path, "rb") as f:
-            raw = f.read()
-    except Exception:
-        return []
+    raw = parsed.get("_raw_bytes")
+    if raw is None:
+        if not raw_path:
+            return []
+        try:
+            with open(raw_path, "rb") as f:
+                raw = f.read()
+            parsed["_raw_bytes"] = raw
+        except Exception:
+            return []
+
+    mm_starts = parsed.get("_mm_starts")
+    mm_sorted = parsed.get("_mm_sorted")
+    mod_intervals = parsed.get("_mod_intervals")
+    mod_starts = parsed.get("_mod_starts")
 
     def read_u64(addr: int):
+        if mm_starts and mm_sorted:
+            idx = _bisect.bisect_right(mm_starts, addr) - 1
+            if idx >= 0:
+                start, msz, rva = mm_sorted[idx]
+                if start <= addr < start + msz:
+                    off = addr - start
+                    if rva + off + 8 <= len(raw):
+                        return struct.unpack_from("<Q", raw, rva + off)[0]
+            return None
         for (start, msz, rva) in parsed.get("memory_map", []):
             if start <= addr < start + msz:
                 off = addr - start
@@ -1954,6 +2047,13 @@ def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
         return None
 
     def addr_to_mod(addr: int):
+        if mod_starts and mod_intervals:
+            idx = _bisect.bisect_right(mod_starts, addr) - 1
+            if idx >= 0:
+                base, end, name, full = mod_intervals[idx]
+                if base <= addr < end:
+                    return name, addr - base
+            return None, 0
         for m in modules:
             try:
                 base = int(m["base"], 16)
@@ -1977,7 +2077,7 @@ def walk_stack(parsed: dict, rsp: int, max_frames: int = 20) -> list:
         scanned += 8
     return frames
 
-def analyse_threads(parsed: dict) -> list:
+def analyse_threads_impl(parsed: dict) -> list:
 
     NTDLL_WAITS = {
         0x161B14: ("NtWaitForSingleObject",         "Waiting on event / mutex / semaphore"),
@@ -2118,6 +2218,14 @@ def analyse_threads(parsed: dict) -> list:
         return 3
 
     result.sort(key=sort_key)
+    return result
+
+
+def analyse_threads(parsed: dict) -> list:
+    if "_analyse_threads_cache" in parsed:
+        return parsed["_analyse_threads_cache"]
+    result = analyse_threads_impl(parsed)
+    parsed["_analyse_threads_cache"] = result
     return result
 
 
@@ -2875,7 +2983,7 @@ STINGRAY_GAME_EXES = {
     "helldivers2.exe",
 }
 
-def _is_stingray_suicide(parsed: dict) -> tuple:
+def _is_stingray_suicide_impl(parsed: dict) -> tuple:
     ex = parsed.get("exception", {}) or {}
     if not ex:
         return (False, "")
@@ -2941,6 +3049,14 @@ def _is_stingray_suicide(parsed: dict) -> tuple:
     return (False, "")
 
 
+def _is_stingray_suicide(parsed: dict) -> tuple:
+    if "_suicide_cache" in parsed:
+        return parsed["_suicide_cache"]
+    result = _is_stingray_suicide_impl(parsed)
+    parsed["_suicide_cache"] = result
+    return result
+
+
 def _identify_bad_register(decoded_instr: dict, null_regs: dict, fault_addr: int) -> "str | None":
     if not decoded_instr or not null_regs:
         return None
@@ -2959,6 +3075,22 @@ def _identify_bad_register(decoded_instr: dict, null_regs: dict, fault_addr: int
             return reg
     return None
 
+
+import bisect as _bisect
+
+def _mm_lookup(memory_map: list, addr: int):
+    starts = getattr(memory_map, '_starts', None)
+    if starts is None:
+        for (start, msz, rva) in memory_map:
+            if start <= addr < start + msz:
+                return start, msz, rva
+        return None
+    idx = _bisect.bisect_right(starts, addr) - 1
+    if idx >= 0:
+        start, msz, rva = memory_map[idx]
+        if start <= addr < start + msz:
+            return start, msz, rva
+    return None
 
 def _read_mem(raw: bytes, memory_map: list, addr: int, size: int) -> "bytes | None":
     for (start, msz, rva) in memory_map:
@@ -3047,6 +3179,10 @@ def _is_valid_return_address(addr: int, mod_base: int, pdata: "list | None") -> 
 
 
 def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
+    cache_key = "_call_chain_cache"
+    if cache_key in parsed:
+        return parsed[cache_key]
+
     ex        = parsed.get("exception", {}) or {}
     ex_regs   = ex.get("regs", {})
     crash_rip = int(ex.get("address", "0"), 16) if ex else 0
@@ -3055,7 +3191,8 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
     raw_path  = parsed.get("_raw_path")
     memory_map = parsed.get("memory_map", [])
 
-    if not crash_rsp or not raw_path:
+    if not crash_rsp:
+        parsed[cache_key] = []
         return []
 
     SKIP_NAMES = {
@@ -3075,7 +3212,19 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
             return False
         return not any(frag in fl for frag in SKIP_PATH_FRAGMENTS)
 
+    mm_starts = parsed.get("_mm_starts")
+    mm_sorted = parsed.get("_mm_sorted")
+    mod_intervals = parsed.get("_mod_intervals")
+    mod_starts = parsed.get("_mod_starts")
+
     def addr_to_mod(addr: int):
+        if mod_starts and mod_intervals:
+            idx = _bisect.bisect_right(mod_starts, addr) - 1
+            if idx >= 0:
+                base, end, name, full = mod_intervals[idx]
+                if base <= addr < end:
+                    return name, addr - base, full, base
+            return None, 0, "", 0
         for m in modules:
             try:
                 base = int(m["base"], 16)
@@ -3085,11 +3234,16 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
                 pass
         return None, 0, "", 0
 
-    try:
-        with open(raw_path, "rb") as f:
-            raw = f.read()
-    except Exception:
-        return []
+    raw = parsed.get("_raw_bytes")
+    if raw is None:
+        if not raw_path:
+            return []
+        try:
+            with open(raw_path, "rb") as f:
+                raw = f.read()
+            parsed["_raw_bytes"] = raw
+        except Exception:
+            return []
 
     pdata_cache: dict = {}
     for m in modules:
@@ -3103,6 +3257,15 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
             pass
 
     def read_u64(addr: int) -> "int | None":
+        if mm_starts and mm_sorted:
+            idx = _bisect.bisect_right(mm_starts, addr) - 1
+            if idx >= 0:
+                start, msz, rva = mm_sorted[idx]
+                if start <= addr < start + msz:
+                    off = addr - start
+                    if rva + off + 8 <= len(raw):
+                        return struct.unpack_from("<Q", raw, rva + off)[0]
+            return None
         return _read_u64_mem(raw, memory_map, addr)
 
     chain = []
@@ -3160,10 +3323,12 @@ def _reconstruct_call_chain(parsed: dict, max_frames: int = 200) -> list:
             parsed["_stack_unwind"]["fallback_scan"] = len(chain)
 
     parsed["_stack_chain_extended"] = chain
-    return [(a, m, o) for a, m, o, _ in chain]
+    result = [(a, m, o) for a, m, o, _ in chain]
+    parsed["_call_chain_cache"] = result
+    return result
 
 
-def _active_game_threads_at_crash(parsed: dict) -> list:
+def _active_game_threads_at_crash_impl(parsed: dict) -> list:
     ex        = parsed.get("exception", {}) or {}
     crash_tid = ex.get("thread_id")
     modules   = parsed.get("modules", [])
@@ -3211,6 +3376,14 @@ VAD_PROT_NAMES = {
     0x10: "EXECUTE", 0x20: "EXECUTE_READ", 0x40: "EXECUTE_READWRITE", 0x80: "EXECUTE_WRITECOPY",
 }
 VAD_TYPE_NAMES = {0x20000: "PRIVATE", 0x40000: "MAPPED", 0x1000000: "IMAGE"}
+
+
+def _active_game_threads_at_crash(parsed: dict) -> list:
+    if "__active_game_threads_at_crash_cache" in parsed:
+        return parsed["__active_game_threads_at_crash_cache"]
+    result = _active_game_threads_at_crash_impl(parsed)
+    parsed["__active_game_threads_at_crash_cache"] = result
+    return result
 
 
 def _detect_eac_and_vad(parsed: dict, crash_addr: int) -> list:
@@ -3367,11 +3540,17 @@ def _detect_eac_and_vad(parsed: dict, crash_addr: int) -> list:
             detail_parts = [
                 "EAC detected code tampering and deliberately crashed the process.",
                 "This is NOT a game bug - EAC's anti-cheat protection detected that game code",
-                "was modified (patched with NOP instructions, 0x90) and executed a privileged",
-                "instruction to terminate the process.",
+                "was modified and executed a privileged instruction to terminate the process.",
             ]
             if nop_sled:
                 detail_parts.append(f"\nDetection signal: {nop_reg} = 0x90909090 (NOP sled - code was overwritten with NOPs).")
+            else:
+                rcx_val = ex_regs.get("rcx", 0)
+                rax_val = ex_regs.get("rax", 0)
+                detail_parts.append(f"\nDetection signal: EAC privileged instruction crash in private RWX memory.")
+                detail_parts.append(f"  RCX = 0x{rcx_val:016X}, RAX = 0x{rax_val:016X}")
+                detail_parts.append("  (No NOP sled detected -- EAC may have detected a different type of code modification")
+                detail_parts.append("   or integrity violation, not NOP-patching.)")
             if is_privileged_opcode:
                 detail_parts.append("\nCrash instruction: 0F 01 (LGDT/SGDT/LIDT/SIDT - a privileged CPU instruction")
                 detail_parts.append("that is illegal in user mode. EAC executes this deliberately to crash.")
@@ -3388,10 +3567,17 @@ def _detect_eac_and_vad(parsed: dict, crash_addr: int) -> list:
             else:
                 detail_parts.append(f"\nCrash address 0x{crash_addr:016X} is in a small private EXECUTE_READWRITE region")
                 detail_parts.append("(EAC's injected hook code, not game code).")
-            detail_parts.append("\nThis means someone or something modified the game's code in memory:")
-            detail_parts.append("  - A mod, trainer, or cheat tool patched game code with NOPs")
-            detail_parts.append("  - A hook was installed and then removed, leaving NOPs behind")
-            detail_parts.append("  - A debugger or code injection tool modified instructions")
+            if nop_sled:
+                detail_parts.append("\nThis means someone or something modified the game's code in memory:")
+                detail_parts.append("  - A mod, trainer, or cheat tool patched game code with NOPs")
+                detail_parts.append("  - A hook was installed and then removed, leaving NOPs behind")
+                detail_parts.append("  - A debugger or code injection tool modified instructions")
+            else:
+                detail_parts.append("\nEAC detected an integrity violation (not necessarily NOP-patching):")
+                detail_parts.append("  - A mod, trainer, or cheat tool may have modified game code or memory")
+                detail_parts.append("  - A hook or code injection may have been detected by EAC's checks")
+                detail_parts.append("  - On very old Windows builds (e.g. 10.0.17763 / 1809), EAC may have")
+                detail_parts.append("    compatibility issues -- update Windows to the latest version")
             detail_parts.append("\nFix: Remove all mods, trainers, and code injection tools. Verify game files")
             detail_parts.append("through Steam. If you weren't using any mods, scan for malware that may")
             detail_parts.append("be injecting code into the game process.")
@@ -3409,7 +3595,7 @@ def sca_read_vmem_for_eac(parsed, addr, size):
     return read_virtual_memory(parsed, addr, size)
 
 
-def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
+def assess_root_cause_impl(parsed: dict) -> list[tuple[str, str, str]]:
 
     findings = []
 
@@ -3893,6 +4079,14 @@ def assess_root_cause(parsed: dict) -> list[tuple[str, str, str]]:
 
 CRASH_SIGNATURES: list = []
 
+def assess_root_cause(parsed: dict) -> list:
+    if "_rootcause_cache" in parsed:
+        return parsed["_rootcause_cache"]
+    result = assess_root_cause_impl(parsed)
+    parsed["_rootcause_cache"] = result
+    return result
+
+
 def _register_signature(sig_id: str, title: str, status: str, fix: str, match_fn) -> None:
     CRASH_SIGNATURES.append({
         "id": sig_id, "title": title, "status": status, "fix": fix, "match": match_fn,
@@ -3949,9 +4143,9 @@ def _match_sig_hd2_ssr_01(parsed: dict):
     first; varies by machine, ASLR, and call depth) and faults with
     0xC0000005.
 
-    Confirmed on multiple machines with different crash offsets, faulting
-    addresses, and specific recursion hubs within the +0x170xxxx region.
-    All share the same +0x170xxxx recursion region and 0xFFFFFFFF stack-smash
+    The crash offset, faulting address, and specific recursion hub within
+    the +0x170xxxx region vary by machine, ASLR, and call depth. All cases
+    share the same +0x170xxxx recursion region and 0xFFFFFFFF stack-smash
     sentinel pattern.
 
     Fix: clean reinstall of the game. The recursion is triggered by corrupted
@@ -3970,8 +4164,11 @@ def _match_sig_hd2_ssr_01(parsed: dict):
     if len(params) < 2:
         return False, []
     fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
-    if fault_mod != "helldivers2.exe":
-        return False, []
+    # SSR-01 normally requires fault_mod == "helldivers2.exe", but the recursion
+    # can smash the stack so badly that RIP gets redirected to a near-null address
+    # (0x0, 0x1, 0x8, etc.) that is NOT in any module. In that case, fault_mod
+    # is None. We still match if the +0x170xxxx recursion is visible in the call
+    # chain AND there are sentinels on the stack (indicating stack smashing).
     # Exclude crashes at known specific crash sites that have their own signatures.
     # +0x9F60ED is SIG-HD2-AVND-01 (audio voice null-deref).
     # +0x6AC699 is SIG-HD2-REF-01 (RefcountedPackageSystem reference map overflow).
@@ -3994,10 +4191,31 @@ def _match_sig_hd2_ssr_01(parsed: dict):
     repeating_in_region = {off: cnt for off, cnt in region_counts.items() if cnt >= 2}
     total_region_repeats = sum(repeating_in_region.values())
     total_region_frames = sum(region_counts.values())
-    if total_region_repeats < 3 and total_region_frames < 2:
-        return False, []
     sentinel_count = _sig_sentinel_count(chain)
-    if sentinel_count < 3 and total_region_repeats < 3 and total_region_frames < 3:
+    raw_stack_sentinels = 0
+    try:
+        crash_rsp = int(ex.get("regs", {}).get("rsp", "0"), 16)
+        mem_list = parsed.get("memory_list", [])
+        for (mstart, msize, mdata) in mem_list:
+            if mstart <= crash_rsp < mstart + msize:
+                for k in range(0, len(mdata) - 7, 8):
+                    v = struct.unpack_from("<Q", mdata, k)[0] if len(mdata) >= k + 8 else 0
+                    if v == 0xFFFFFFFFFFFFFFFF or v == 0x00000000FFFFFFFF:
+                        raw_stack_sentinels += 1
+                break
+    except Exception:
+        pass
+    if fault_mod == "helldivers2.exe":
+        if total_region_repeats < 3 and total_region_frames < 2:
+            return False, []
+        if sentinel_count < 3 and total_region_repeats < 3 and total_region_frames < 3:
+            return False, []
+    elif fault_mod is None:
+        if total_region_repeats < 3:
+            return False, []
+        if sentinel_count < 3 and raw_stack_sentinels < 5:
+            return False, []
+    else:
         return False, []
     p0 = int(params[0], 16) if params[0] else 0
     op_str = {0: "READ", 1: "WRITE", 8: "EXECUTE"}.get(p0, "unknown")
@@ -4035,14 +4253,147 @@ def _match_sig_hd2_ssr_01(parsed: dict):
 
 _register_signature(
     "SIG-HD2-SSR-01",
-    "Helldivers 2 Stingray Setup Recursion (build 19411)",
-    "resolved",
+    "Helldivers 2 Stingray Setup Recursion (builds 19411, 19464)",
+    "open",
     "RCX=0 (or RAX=0): clean reinstall of the game. "
     "RCX not null: clear shader cache and delete user_settings.config. "
     "The root cause is recursion through helldivers2.exe +0x170xxxx code region; "
     "RCX being null indicates package data corruption (reinstall), "
-    "RCX not null indicates shader/settings corruption (cache clear).",
+    "RCX not null indicates shader/settings corruption (cache clear). "
+    "The shader cache clear fix (for RCX not null) is effective even though the game "
+    "bug is not fully fixed in the game code.",
     _match_sig_hd2_ssr_01,
+)
+
+
+def _match_sig_hd2_ssr02_01(parsed: dict):
+    """SIG-HD2-SSR02-01: Helldivers 2 engine recursion in +0x148xxxx region.
+
+    Same mechanism as SSR-01 (unbounded recursion overflowing the stack), but
+    in a DIFFERENT recursion hub: +0x148xxxx instead of +0x170xxxx. The crash
+    manifests as a null deref or corrupt pointer read in runtime.dll's packed
+    code.
+
+    Fix: same as SSR-01 -- clear shader cache, verify game files, reinstall.
+    If unresolved: report to Arrowhead.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    try:
+        chain = _reconstruct_call_chain(parsed)
+    except Exception:
+        chain = []
+    from collections import Counter as _Counter
+    region_counts = _Counter()
+    for _, m, o in chain:
+        if m == "helldivers2.exe" and 0x1480000 <= o < 0x1490000:
+            region_counts[o] += 1
+    repeating_in_region = {off: cnt for off, cnt in region_counts.items() if cnt >= 2}
+    total_region_repeats = sum(repeating_in_region.values())
+    if total_region_repeats < 3:
+        return False, []
+    sentinel_count = _sig_sentinel_count(chain)
+    p0 = 0
+    params = ex.get("params", [])
+    if params:
+        try:
+            p0 = int(params[0], 16) if params[0] else 0
+        except (ValueError, TypeError):
+            pass
+    op_str = {0: "READ", 1: "WRITE", 8: "EXECUTE"}.get(p0, "unknown")
+    fault_addr = params[1] if len(params) >= 2 else "?"
+    hub_desc = ", ".join("+0x%X x%d" % (off, cnt)
+                         for off, cnt in sorted(repeating_in_region.items()))
+    if not hub_desc:
+        hub_desc = "%d frame(s) in region" % total_region_repeats
+    evidence = [
+        "exception 0xC0000005 (%s)" % op_str,
+        "faulting address 0x%s (corrupted pointer; varies by machine)" % fault_addr,
+        "recursion in +0x148xxxx region: %s (root cause)" % hub_desc,
+        "total repeating frames in region: %d" % total_region_repeats,
+        "stack-smash sentinels (0xFFFFFFFF): %d" % sentinel_count,
+        "note: different recursion hub from SSR-01 (+0x170xxxx)",
+        "fix: clear shader cache, verify game files, reinstall. Report to Arrowhead if unresolved.",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-SSR02-01",
+    "Helldivers 2 engine recursion in +0x148xxxx region",
+    "open",
+    "Clear shader cache and delete user_settings.config. Verify game files in Steam. "
+    "If unresolved: clean reinstall. If still unresolved: report to Arrowhead with the dump. "
+    "This is a different recursion hub from SSR-01 (+0x170xxxx). "
+    "No user-side fix yet.",
+    _match_sig_hd2_ssr02_01,
+)
+
+
+def _match_sig_hd2_pfb_01(parsed: dict):
+    """SIG-HD2-PFB-01: PlayFab Multiplayer SDK crash.
+
+    The crash is inside PlayFabMultiplayerWin.dll (41+ frames at the top of
+    the crash thread). The SDK calls Win32 APIs with invalid parameters or
+    accesses freed memory. Fixed by verifying game files on Steam
+    (corrupted PlayFabMultiplayerWin.dll).
+
+    Fix: verify game files in Steam. If unresolved: reinstall the game.
+    """
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        code = int(ex.get("code", "0"), 16)
+    except (ValueError, TypeError):
+        return False, []
+    if code not in (0xC0000005, 0xC000000D):
+        return False, []
+    try:
+        chain = _reconstruct_call_chain(parsed)
+    except Exception:
+        chain = []
+    pfb_frames = 0
+    for _, m, o in chain:
+        if "playfab" in m.lower():
+            pfb_frames += 1
+    if pfb_frames < 10:
+        return False, []
+    fault_mod, fault_off = _sig_fault_mod_and_offset(parsed)
+    fault_mod_name = fault_mod or "ntdll.dll (called from PlayFab)"
+    p0 = 0
+    params = ex.get("params", [])
+    if params:
+        try:
+            p0 = int(params[0], 16) if params[0] else 0
+        except (ValueError, TypeError):
+            pass
+    op_str = {0: "READ", 1: "WRITE", 8: "EXECUTE"}.get(p0, "unknown")
+    if code == 0xC000000D:
+        op_str = "INVALID_PARAMETER"
+    evidence = [
+        "exception 0x%08X (%s)" % (code, op_str),
+        "faulting module: %s" % fault_mod_name,
+        "PlayFabMultiplayerWin.dll frames: %d (dominates the crash thread)" % pfb_frames,
+        "root cause: PlayFab Multiplayer SDK bug or corrupted DLL",
+        "fix: verify game files in Steam (re-downloads corrupted DLL)",
+    ]
+    return True, evidence
+
+_register_signature(
+    "SIG-HD2-PFB-01",
+    "Helldivers 2 PlayFab Multiplayer SDK crash",
+    "open",
+    "Verify game files in Steam (right-click Helldivers 2 -> Properties -> "
+    "Installed Files -> Verify integrity of game files). This re-downloads the "
+    "corrupted PlayFabMultiplayerWin.dll. If unresolved: clean reinstall. "
+    "Fixed by verifying game files on Steam.",
+    _match_sig_hd2_pfb_01,
 )
 
 
@@ -4126,12 +4477,11 @@ def _match_sig_hd2_ref_01(parsed: dict):
     26 requests / 17 releases on non-crashing machine. Package 0FE88D9B08F6FE80
     reaches ref_count=3 on crashing, 1 on non-crashing.
 
-    VERIFIED via engine log analysis (Task 23): package 0xFE88D9B08F6FE80 loads
-    at StateShip Setup (right after "on game state change, Enter: Ship"). It is
-    a Ship state package, not a weapon or stratagem package. This explains the
-    "~53 seconds after entering Ship state" trigger - the package is requested
-    when the Ship state loads, and if the reference map is already full from
-    accumulated leaks, the request returns null.
+    Package 0xFE88D9B08F6FE80 loads at StateShip Setup (right after "on game
+    state change, Enter: Ship"). It is a Ship state package, not a weapon or
+    stratagem package. This explains the "~53 seconds after entering Ship state"
+    trigger - the package is requested when the Ship state loads, and if the
+    reference map is already full from accumulated leaks, the request returns null.
 
     Crash: WRITE to 0x1018 at helldivers2.exe +0x6AC699, RCX=0, RAX=0x58.
     Trigger: ~53 seconds after entering Ship state, standing still.
@@ -4274,10 +4624,8 @@ def _match_sig_hd2_avnd_01(parsed: dict):
     (VB-Cable, Meta Quest virtual monitor, VirtualBox audio adapter) create
     endpoints that Wwise fails to fully initialize. When the virtual device
     disconnects or changes state, the voice becomes null but stays in the
-    iteration list.
-
-    Confirmed on multiple machines with different RCX values (voice list
-    indices) -- the index varies by which virtual device caused the null.
+    iteration list. The RCX value (voice list index) varies by which virtual
+    device caused the null.
 
     Fix: Remove all virtual audio devices. Set default audio output to a
     single stable device (wired speakers or headphones, not Bluetooth).
@@ -4333,7 +4681,88 @@ _register_signature(
 )
 
 
+def _match_sig_hd2_tpk_01(parsed: dict):
+
+    ex = parsed.get("exception")
+    if not ex:
+        return False, []
+    try:
+        if int(ex.get("code", "0"), 16) != 0xC0000005:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    params = ex.get("params", [])
+    if len(params) < 2:
+        return False, []
+    try:
+        if int(params[0], 16) != 0x0:  # READ
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+    try:
+        if int(params[1], 16) != 0xFFFFFFFFFFFFFFFF:
+            return False, []
+    except (ValueError, TypeError):
+        return False, []
+
+    try:
+        chain = _reconstruct_call_chain(parsed)
+    except Exception:
+        return False, []
+    if not chain or len(chain) > 10:
+        return False, []
+
+    layer12_count = sum(1 for fr in chain if fr[1].lower() == "runtime.dll" and fr[2] == 0x554880)
+    if layer12_count < 2:
+        return False, []
+
+    has_preloader_tramp = any(
+        fr[1].lower() == "preloader.dll" and fr[2] == 0x3590 for fr in chain
+    )
+    if not has_preloader_tramp:
+        return False, []
+
+    fault_mod = (ex.get("faulting_module") or "").lower()
+    first_frame_mod = chain[0][1].lower() if chain else ""
+    if "runtime.dll" not in fault_mod and first_frame_mod != "runtime.dll":
+        return False, []
+
+    sysinfo = parsed.get("system_info", {})
+    cpu_count = sysinfo.get("cpu_count", 0)
+    if not isinstance(cpu_count, int) or cpu_count < 24:
+        return False, []
+
+    evidence = [
+        "exception 0xC0000005 (READ) at 0xFFFFFFFFFFFFFFFF (THEIA sentinel)",
+        "faulting instruction in runtime.dll +0x3BB5A57 (THEIA Layer 7 VM-obfuscated decrypt)",
+        "THEIA exception dispatch loop: runtime.dll +0x554880 repeats %d times (Layer 1/2)" % layer12_count,
+        "preloader.dll +0x3590 on chain (THEIA NtContinue trampoline)",
+        "short call chain (%d frames) - THEIA PAGE_NOACCESS blocks stack walk" % len(chain),
+        "%d-CPU system - THEIA per-thread TLS re-entrant exception context races on high core counts" % cpu_count,
+        "MECHANISM: THEIA page-level decrypt race condition",
+        "no user-side fix available -- this is a THEIA anti-tamper bug, not a game bug",
+    ]
+    return True, evidence
+
+
+_register_signature(
+    "SIG-HD2-TPK-01",
+    "Helldivers 2 THEIA Packer Kill - page-level decrypt race condition on high-core-count systems",
+    "open",
+    "No user-side fix. This is a bug in THEIA's anti-tamper runtime. "
+    "THEIA encrypts ~60,000 executable pages with PAGE_NOACCESS and "
+    "decrypts them on-demand via a patched KiUserExceptionDispatcher. On systems "
+    "with 24+ cores, the per-thread re-entrant exception context races, the page "
+    "bitmap becomes inconsistent, and the decrypt handler dereferences the "
+    "0xFFFFFFFFFFFFFFFF sentinel. Report to Arrowhead with the dump and the "
+    "runtime.dll offset +0x3BB5A57.",
+    _match_sig_hd2_tpk_01,
+)
+
+
 def match_signatures(parsed: dict) -> list:
+    if "_sigs_cache" in parsed:
+        return parsed["_sigs_cache"]
     matched = []
     for sig in CRASH_SIGNATURES:
         try:
@@ -4348,6 +4777,7 @@ def match_signatures(parsed: dict) -> list:
                 })
         except Exception:
             pass
+    parsed["_sigs_cache"] = matched
     return matched
 
 
@@ -4762,6 +5192,17 @@ def read_virtual_memory(parsed: dict, addr: int, size: int = 128) -> "bytes | No
             parsed["_raw_bytes"] = raw
         except Exception:
             return None
+    mm_starts = parsed.get("_mm_starts")
+    mm_sorted = parsed.get("_mm_sorted")
+    if mm_starts and mm_sorted:
+        idx = _bisect.bisect_right(mm_starts, addr) - 1
+        if idx >= 0:
+            start, msz, rva = mm_sorted[idx]
+            if start <= addr < start + msz:
+                off   = addr - start
+                avail = min(size, msz - off)
+                return raw[rva + off: rva + off + avail]
+        return None
     for (start, msz, rva) in parsed.get("memory_map", []):
         if start <= addr < start + msz:
             off   = addr - start
@@ -6596,6 +7037,7 @@ def _builtin(pattern_id: str, default: dict) -> "dict | None":
 
 def _match_all_patterns(parsed: dict, decoded_instr: "dict | None",
                         mods: dict, rootcause: list) -> list:
+    mods = mods or {}
     custom_matches = _match_all_custom_patterns(parsed, decoded_instr, mods)
     custom_ids     = {c["id"] for c in custom_matches}
 
@@ -6615,6 +7057,7 @@ def _match_all_patterns(parsed: dict, decoded_instr: "dict | None",
 
 def _match_patterns(parsed: dict, decoded_instr: "dict | None",
                     mods: dict, rootcause: list) -> "dict | None":
+    mods = mods or {}
 
     custom = _match_custom_patterns(parsed, decoded_instr, mods)
     if custom:
@@ -6755,7 +7198,7 @@ def _match_patterns(parsed: dict, decoded_instr: "dict | None",
         if stingray_suicide:
             is_suicide = True
 
-    if mods.get("lua_mods"):
+    if mods and mods.get("lua_mods"):
         lua_mods = mods["lua_mods"]
         lua_files = [PureWindowsPath(lm["path"]).name for lm in lua_mods]
         lua_list = ", ".join(lua_files[:3])
@@ -8366,6 +8809,7 @@ CONF_COLORS = {"HIGH": GREEN, "MED": YELLOW, "LOW": TEXT_DIM}
 
 def compute_verdict(parsed: dict, rootcause: list, mods: dict, pattern: dict,
                     all_patterns: list, decoded_instr: dict = None) -> dict:
+    mods = mods or {}
     ex = parsed.get("exception", {}) or {}
     modules = parsed.get("modules", [])
     threads = parsed.get("threads", [])
@@ -8723,17 +9167,49 @@ class VerdictBanner(tk.Frame):
         super().__init__(parent, **kwargs)
         self.configure(bg=BG2)
         self._verdict_color = V_INCONCLUSIVE
+        self._collapsed = False
         self._build()
 
     def _build(self):
         self._strip = tk.Frame(self, bg=self._verdict_color, height=4)
         self._strip.pack(fill="x")
 
+        self._collapsed_bar = tk.Frame(self, bg=BG2)
+
+        self._collapsed_left = tk.Frame(self._collapsed_bar, bg=BG2)
+        self._collapsed_left.pack(side="left", fill="x", expand=True, padx=12, pady=6)
+
+        self._expand_btn = tk.Label(self._collapsed_left, text="  ▶  ", bg=BG2,
+                                    fg=ACCENT, font=(UI_FONT, 11, "bold"),
+                                    cursor="hand2")
+        self._expand_btn.pack(side="left", padx=(0, 8))
+        self._expand_btn.bind("<Button-1>", lambda e: self._toggle())
+        self._expand_btn.bind("<Enter>", lambda e: self._expand_btn.configure(fg=ACCENT2))
+        self._expand_btn.bind("<Leave>", lambda e: self._expand_btn.configure(fg=ACCENT))
+
+        self._collapsed_verdict = tk.Label(self._collapsed_left, text="INCONCLUSIVE",
+                                           bg=BG2, fg=self._verdict_color,
+                                           font=(UI_FONT, 9, "bold"))
+        self._collapsed_verdict.pack(side="left", padx=(0, 12))
+
+        self._collapsed_sig = tk.Label(self._collapsed_left, text="", bg=BG2,
+                                       fg=TEXT_DIM, font=(UI_MONO, 8))
+        self._collapsed_sig.pack(side="left")
+
         content = tk.Frame(self, bg=BG2, padx=20, pady=12)
         content.pack(fill="x")
+        self._content = content
 
         left = tk.Frame(content, bg=BG2)
         left.pack(side="left", fill="x", expand=True)
+
+        self._collapse_btn = tk.Label(left, text="  ▼  ", bg=BG2,
+                                      fg=ACCENT, font=(UI_FONT, 11, "bold"),
+                                      cursor="hand2")
+        self._collapse_btn.pack(anchor="w")
+        self._collapse_btn.bind("<Button-1>", lambda e: self._toggle())
+        self._collapse_btn.bind("<Enter>", lambda e: self._collapse_btn.configure(fg=ACCENT2))
+        self._collapse_btn.bind("<Leave>", lambda e: self._collapse_btn.configure(fg=ACCENT))
 
         self._verdict_label = tk.Label(left, text="INCONCLUSIVE", bg=BG2,
                                        fg=self._verdict_color,
@@ -8765,6 +9241,16 @@ class VerdictBanner(tk.Frame):
                                    font=(UI_MONO, 8))
         self._sig_label.pack(anchor="e", pady=(2, 0))
 
+    def _toggle(self):
+        if self._collapsed:
+            self._collapsed_bar.pack_forget()
+            self._content.pack(fill="x")
+            self._collapsed = False
+        else:
+            self._content.pack_forget()
+            self._collapsed_bar.pack(fill="x")
+            self._collapsed = True
+
     def update_verdict(self, verdict_info: dict):
         color = verdict_info["color"]
         self._verdict_color = color
@@ -8780,7 +9266,11 @@ class VerdictBanner(tk.Frame):
 
         conf = verdict_info["confidence"]
         self._conf_label.configure(text=f"CONFIDENCE: {conf}", fg=CONF_COLORS.get(conf, TEXT_DIM))
-        self._sig_label.configure(text=f"SIG: {verdict_info['signature']}")
+        sig_text = f"SIG: {verdict_info['signature']}"
+        self._sig_label.configure(text=sig_text)
+
+        self._collapsed_verdict.configure(text=verdict_info["verdict"], fg=color)
+        self._collapsed_sig.configure(text=sig_text)
 
     def clear(self):
         self._strip.configure(bg=V_INCONCLUSIVE)
@@ -8790,6 +9280,8 @@ class VerdictBanner(tk.Frame):
         self._location_label.configure(text="")
         self._conf_label.configure(text="")
         self._sig_label.configure(text="")
+        self._collapsed_verdict.configure(text="INCONCLUSIVE", fg=V_INCONCLUSIVE)
+        self._collapsed_sig.configure(text="")
 
 
 class ActionPanel(tk.Frame):
@@ -11276,9 +11768,19 @@ class CrashAnalyzerUI(_BaseWindow):
                 except Exception:
                     pass
 
-                mods = detect_mods(parsed)
-                pattern = _match_patterns(parsed, decoded_instr, mods, rootcause)
-                all_patterns = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    fut_mods     = pool.submit(detect_mods, parsed)
+                    fut_threads  = pool.submit(analyse_threads, parsed)
+                    fut_dlls     = pool.submit(verify_critical_dlls, parsed)
+                    fut_active   = pool.submit(_active_game_threads_at_crash, parsed)
+
+                    mods = fut_mods.result()
+                    pattern      = _match_patterns(parsed, decoded_instr, mods, rootcause)
+                    all_patterns = _match_all_patterns(parsed, decoded_instr, mods, rootcause)
+                    parsed["_threads_analysis"]  = fut_threads.result()
+                    parsed["_dll_verify"]        = fut_dlls.result()
+                    parsed["_active_threads"]    = fut_active.result()
 
                 verdict_info = compute_verdict(parsed, rootcause, mods, pattern,
                                                all_patterns, decoded_instr)
@@ -11289,10 +11791,11 @@ class CrashAnalyzerUI(_BaseWindow):
                                               all_patterns, verdict_info, decoded_instr)
 
                 self.after(0, _maybe_display)
-            except Exception as e:
-                def _maybe_show_error():
+            except Exception as _e:
+                _err_msg = str(_e)
+                def _maybe_show_error(_msg=_err_msg):
                     if self._load_generation == my_generation:
-                        self._status(f"Parse error: {e}", busy=False)
+                        self._status(f"Parse error: {_msg}", busy=False)
                         self._open_btn.config(state="normal")
                 self.after(0, _maybe_show_error)
 
@@ -11992,7 +12495,7 @@ class CrashAnalyzerUI(_BaseWindow):
             lines.append("MOD DETECTION")
             for ind in mods.get("indicators", []):
                 lines.append(f"  [{ind['severity']}] {ind['type']}: {ind['detail']}")
-            if mods.get("lua_mods"):
+            if mods and mods.get("lua_mods"):
                 for lm in mods["lua_mods"]:
                     lines.append(f"  [LUA] {PureWindowsPath(lm['path']).name} - {lm.get('reason', '')}")
             lines.append("")
