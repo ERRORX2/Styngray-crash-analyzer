@@ -20,9 +20,9 @@ A desktop tool for analyzing `.dmp` minidump files from games built on the **Aut
 ---
 
 <!-- LATEST_RELEASE_START -->
-### Latest Release: v2.1.1 (2026-10-27)
+### Latest Release: v2.1.2 (2026-11-03)
 
-- Download: [release_v2.1.1.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v2.1.1/release_v2.1.1.zip)
+- Download: [release_v2.1.2.zip](https://github.com/ERRORX2/Styngray-crash-analyzer/releases/download/v2.1.2/release_v2.1.2.zip)
 - All releases: [releases](https://github.com/ERRORX2/Styngray-crash-analyzer/releases)
 
 ### Cryptographic Integrity
@@ -32,10 +32,10 @@ A desktop tool for analyzing `.dmp` minidump files from games built on the **Aut
 
 | File | SHA-256 |
 |---|---|
-| `StingrayAnalyzer.exe` | `C9B21D13A12DB5655FEBE8437681DD14F093195489FB764A18E5F5BF031164FD` |
-| `crash_patterns.json` | `E711C98BA836ECF7D66CF6C7495486E17DF5E6CCC197AFFA02B0D28515D2C9DD` |
-| `manifest.json` | `F17065EECDF785C9D9161137057B62ED401D25E04D793A833E93DFEE09F38CA4` |
-| `release_v2.1.1.zip` | `8590DB5D88281B88891A9528FC54CA9E969C7BA9A5362603E3A6EAED9E09BF93` |
+| `StingrayAnalyzer.exe` | `2DF5E56E4D0BC4C723C2A6AC37B10B8788EB37A0238F6BA34B7E1A79AF4B7633` |
+| `crash_patterns.json` | `DEE73F953E5A70631E2F69007E80C3C2E878359F11EE3AF0CA2D02E7BBF4D7E9` |
+| `manifest.json` | `7EA9E8B76ABE3F94A982CEF09A12BCD9E29D3BC416C965DE3BB0E775C87C5D7A` |
+| `release_v2.1.2.zip` | `F00050FDA17E4C2FA3C70F9B183433CB3ABC7F2F7AD5103C80B5CD8319A1D1CD` |
 
 </details>
 <!-- LATEST_RELEASE_END -->
